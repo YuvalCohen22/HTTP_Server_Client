@@ -31,7 +31,7 @@ int main(int argc,char* args[]) {
 	int numJobs = atoi(args[3]);
 	pthread_t destroyer;
 	threadpool* tp =  create_threadpool(numThreads,qMaxSize);
-	
+    printf("created threadpool with %d threads and %d max queue size\n", numThreads, qMaxSize);
 	for(int i=0; i<numJobs; i++)
 		dispatch(tp, printMe, NULL);
 	

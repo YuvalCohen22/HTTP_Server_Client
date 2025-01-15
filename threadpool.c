@@ -4,13 +4,13 @@
 
 threadpool* create_threadpool(int num_threads_in_pool, int max_queue_size) {
     if (num_threads_in_pool > MAXT_IN_POOL || num_threads_in_pool <= 0)
-        return nullptr;
+        return NULL;
     if (max_queue_size > MAXW_IN_QUEUE || max_queue_size <= 0)
-        return nullptr;
+        return NULL;
     threadpool *pThreadpoolSt = (threadpool *) malloc(sizeof(threadpool));
     if (pThreadpoolSt == NULL) {
         perror("malloc");
-        return nullptr;
+        return NULL;
     }
     pThreadpoolSt->num_threads = num_threads_in_pool;
     pThreadpoolSt->max_qsize = max_queue_size;
@@ -19,43 +19,43 @@ threadpool* create_threadpool(int num_threads_in_pool, int max_queue_size) {
     if (pThreadpoolSt->threads == NULL) {
         perror("malloc");
         free(pThreadpoolSt);
-        return nullptr;
+        return NULL;
     }
-    pThreadpoolSt->qhead = pThreadpoolSt->qtail = nullptr;
-    if (pthread_mutex_init(&pThreadpoolSt->qlock, nullptr) != 0) {
+    pThreadpoolSt->qhead = pThreadpoolSt->qtail = NULL;
+    if (pthread_mutex_init(&pThreadpoolSt->qlock, NULL) != 0) {
         perror("init mutex");
         free(pThreadpoolSt->threads);
         free(pThreadpoolSt);
-        return nullptr;
+        return NULL;
     }
-    if (pthread_cond_init(&pThreadpoolSt->q_not_empty, nullptr) != 0) {
+    if (pthread_cond_init(&pThreadpoolSt->q_not_empty, NULL) != 0) {
         perror("init cond");
         free(pThreadpoolSt->threads);
         pthread_mutex_destroy(&pThreadpoolSt->qlock);
         free(pThreadpoolSt);
-        return nullptr;
+        return NULL;
     }
-    if (pthread_cond_init(&pThreadpoolSt->q_not_full, nullptr) != 0) {
+    if (pthread_cond_init(&pThreadpoolSt->q_not_full, NULL) != 0) {
         perror("init cond");
         free(pThreadpoolSt->threads);
         pthread_mutex_destroy(&pThreadpoolSt->qlock);
         pthread_cond_destroy(&pThreadpoolSt->q_not_empty);
         free(pThreadpoolSt);
-        return nullptr;
+        return NULL;
     }
     pThreadpoolSt->shutdown = pThreadpoolSt->dont_accept = 0;
     for (int i = 0; i < num_threads_in_pool; ++i) {
-        if (pthread_create(&pThreadpoolSt->threads[i], nullptr, do_work, pThreadpoolSt) != 0) {
+        if (pthread_create(&pThreadpoolSt->threads[i], NULL, do_work, pThreadpoolSt) != 0) {
             perror("create thread");
             pthread_mutex_destroy(&pThreadpoolSt->qlock);
             pthread_cond_destroy(&pThreadpoolSt->q_not_empty);
             pthread_cond_destroy(&pThreadpoolSt->q_not_full);
             for (int j = 0; i < j; j++) {
-                pthread_join(pThreadpoolSt->threads[i], nullptr);
+                pthread_join(pThreadpoolSt->threads[i], NULL);
             }
             free(pThreadpoolSt->threads);
             free(pThreadpoolSt);
-            return nullptr;
+            return NULL;
         }
     }
     return pThreadpoolSt;
@@ -112,8 +112,8 @@ void* do_work(void* p) {
             pthread_cond_signal(&thread_pool->q_not_empty);
         }
         work_t* work = thread_pool->qhead;
-        if (thread_pool->qsize) {
-            thread_pool->qtail = nullptr;
+        if (thread_pool->qsize == 1) {
+            thread_pool->qtail = NULL;
         }
         thread_pool->qhead = thread_pool->qhead->next;
         thread_pool->qsize--;
@@ -136,8 +136,9 @@ void destroy_threadpool(threadpool* destroyme) {
     }
     destroyme->shutdown = 1;
     pthread_cond_broadcast(&destroyme->q_not_empty);
+    pthread_mutex_unlock(&destroyme->qlock);
     for (int i = 0; i < destroyme->num_threads; ++i) {
-        pthread_join(destroyme->threads[i], nullptr);
+        pthread_join(destroyme->threads[i], NULL);
     }
     pthread_cond_destroy(&destroyme->q_not_empty);
     pthread_cond_destroy(&destroyme->q_not_full);
