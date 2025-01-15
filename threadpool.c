@@ -18,30 +18,43 @@ threadpool* create_threadpool(int num_threads_in_pool, int max_queue_size) {
     pThreadpoolSt->threads = (pthread_t *) malloc(sizeof(pthread_t) * num_threads_in_pool);
     if (pThreadpoolSt->threads == NULL) {
         perror("malloc");
-        // free pThreadpoolSt
+        free(pThreadpoolSt);
         return nullptr;
     }
     pThreadpoolSt->qhead = pThreadpoolSt->qtail = nullptr;
     if (pthread_mutex_init(&pThreadpoolSt->qlock, nullptr) != 0) {
         perror("init mutex");
-        // free
+        free(pThreadpoolSt->threads);
+        free(pThreadpoolSt);
         return nullptr;
     }
     if (pthread_cond_init(&pThreadpoolSt->q_not_empty, nullptr) != 0) {
         perror("init cond");
-        //free
+        free(pThreadpoolSt->threads);
+        pthread_mutex_destroy(&pThreadpoolSt->qlock);
+        free(pThreadpoolSt);
         return nullptr;
     }
     if (pthread_cond_init(&pThreadpoolSt->q_not_full, nullptr) != 0) {
         perror("init cond");
-        //free
+        free(pThreadpoolSt->threads);
+        pthread_mutex_destroy(&pThreadpoolSt->qlock);
+        pthread_cond_destroy(&pThreadpoolSt->q_not_empty);
+        free(pThreadpoolSt);
         return nullptr;
     }
     pThreadpoolSt->shutdown = pThreadpoolSt->dont_accept = 0;
     for (int i = 0; i < num_threads_in_pool; ++i) {
         if (pthread_create(&pThreadpoolSt->threads[i], nullptr, do_work, pThreadpoolSt) != 0) {
             perror("create thread");
-            //free
+            pthread_mutex_destroy(&pThreadpoolSt->qlock);
+            pthread_cond_destroy(&pThreadpoolSt->q_not_empty);
+            pthread_cond_destroy(&pThreadpoolSt->q_not_full);
+            for (int j = 0; i < j; j++) {
+                pthread_join(pThreadpoolSt->threads[i], nullptr);
+            }
+            free(pThreadpoolSt->threads);
+            free(pThreadpoolSt);
             return nullptr;
         }
     }
@@ -85,13 +98,11 @@ void* do_work(void* p) {
     threadpool* thread_pool = (threadpool*) p;
     while (1) {
         pthread_mutex_lock(&thread_pool->qlock);
-        if (thread_pool->shutdown) {
-            break;
-        }
-        while (thread_pool->qsize == 0) {
+        while (thread_pool->qsize == 0 && !thread_pool->shutdown) {
             pthread_cond_wait(&thread_pool->q_not_empty, &thread_pool->qlock);
         }
         if (thread_pool->shutdown) {
+            pthread_mutex_unlock(&thread_pool->qlock);
             break;
         }
         else {
@@ -118,5 +129,21 @@ void* do_work(void* p) {
 
 
 void destroy_threadpool(threadpool* destroyme) {
+    pthread_mutex_lock(&destroyme->qlock);
+    destroyme->dont_accept = 1;
+    while (destroyme->qsize > 0) {
+        pthread_cond_wait(&destroyme->q_empty, &destroyme->qlock);
+    }
+    destroyme->shutdown = 1;
+    pthread_cond_broadcast(&destroyme->q_not_empty);
+    for (int i = 0; i < destroyme->num_threads; ++i) {
+        pthread_join(destroyme->threads[i], nullptr);
+    }
+    pthread_cond_destroy(&destroyme->q_not_empty);
+    pthread_cond_destroy(&destroyme->q_not_full);
+    pthread_cond_destroy(&destroyme->q_empty);
+    pthread_mutex_destroy(&destroyme->qlock);
+    free(destroyme->threads);
+    free(destroyme);
 
 }
