@@ -1,8 +1,12 @@
+#include <dirent.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include "threadpool.h"
 
@@ -10,10 +14,12 @@
 #define BUFFER_SIZE 4000
 
 int handle_client(const int *client_sock);
-int check_request(char *request);
+int check_bad_request(char *request, char **path);
 bool isValidHttpVersion(const char *version);
+int check_path(char *path);
 void send_response(int client_sock, const char *status, const char *body, const char *content_type);
 char *get_mime_type(char *name);
+bool does_file_exist(char *path, struct stat *stat_buf);
 
 int main(int argc, char *argv[]) {
 
@@ -75,26 +81,88 @@ int main(int argc, char *argv[]) {
 int handle_client(const int *client_sock) {
     char request[BUFFER_SIZE];
     ssize_t bytes_read = read(*client_sock, request, BUFFER_SIZE);
+
     if (bytes_read <= 0) {
         perror("read");
         return -1;
     }
+
     char* end_of_first_line = strstr(request, "\r\n");
     if (end_of_first_line == NULL) {
         send_response(*client_sock, "400 Bad Request", NULL, NULL);
         return -1;
     }
     end_of_first_line[0] = '\0';
-    if (check_request(request) == 400) {
+    char* path;
+
+    int check_req = check_bad_request(request, &path);
+
+    if (check_req== 400) {
         send_response(*client_sock, "400 Bad Request", NULL, NULL);
     }
+
+    else if (check_req == 501) {
+        send_response(*client_sock, "501 Not Implemented", NULL, NULL);
+    }
+
+    int checked_path = check_path(path);
+
+    if (checked_path == 404) {
+        send_response(*client_sock, "404 Not Found", NULL, NULL);
+    }
+
+
 
     send_response(*client_sock, "200 OK", "<h1>Welcome</h1>", "text/html");
     return 0;
 }
 
-// check if request is a bad request. return 400 on bad request and 0 if good.
-int check_request(char *request) {
+int check_path(char *path) {
+    struct stat stat_buf;
+
+    if (does_file_exist(path, &stat_buf)) {
+        return 404;
+    }
+
+    if (S_ISDIR(stat_buf.st_mode)) {
+        if (path[strlen(path) - 1] != '/') {
+            return 302;
+        }
+
+        char index_path[PATH_MAX];
+        snprintf(index_path, sizeof(index_path), "%sindex.html", path);
+        if (stat(index_path, &stat_buf) == 0 && S_ISREG(stat_buf.st_mode)) {
+            return 200;
+        }
+
+        return 200;
+    }
+
+    if (S_ISREG(stat_buf.st_mode)) {
+
+        if (access(path, R_OK) != 0) {
+            return 403;
+        }
+
+        char dir_path[PATH_MAX];
+        strcpy(dir_path, path);
+        char *slash = strrchr(dir_path, '/');
+        if (slash) {
+            *slash = '\0';
+            struct stat dir_stat;
+            if (stat(dir_path, &dir_stat) == 0 && (dir_stat.st_mode & S_IXUSR)) {
+                return 200;
+            }
+        }
+
+        return 403;
+    }
+
+    return 404;
+}
+
+// check if request is a bad request. return 400 on bad request, 501 on not GET method and 0 if good.
+int check_bad_request(char *request, char **path) {
     if (request == NULL) {
         return 400;
     }
@@ -103,17 +171,23 @@ int check_request(char *request) {
     buffer[sizeof(buffer) - 1] = '\0';
 
     char *method = strtok(buffer, " ");
-    char *path = strtok(NULL, " ");
+    char *found_path = strtok(NULL, " ");
     char *protocol = strtok(NULL, " ");
     char *extra = strtok(NULL, " ");
 
-    if (method == NULL || path == NULL || protocol == NULL || extra != NULL) {
+    if (method == NULL || found_path == NULL || protocol == NULL || extra != NULL) {
         return 400;
     }
 
     if (!isValidHttpVersion(protocol)) {
         return 400;
     }
+
+    if (strcmp(method, "GET") != 0) {
+        return 501;
+    }
+
+    (*path) = found_path;
 
     return 0;
 }
@@ -170,6 +244,12 @@ bool isValidHttpVersion(const char *version) {
         }
     }
     return false;
+}
+
+
+// check if file exists.
+bool does_file_exist(char *path, struct stat *stat_buf) {
+    return stat(path, stat_buf) == 0;
 }
 
 
