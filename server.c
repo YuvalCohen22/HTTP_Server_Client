@@ -7,9 +7,11 @@
 #include "threadpool.h"
 
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4000
 
-int handle_client(int *client_sock);
+int handle_client(const int *client_sock);
+int check_request(char *request);
+bool isValidHttpVersion(const char *version);
 void send_response(int client_sock, const char *status, const char *body, const char *content_type);
 char *get_mime_type(char *name);
 
@@ -21,6 +23,9 @@ int main(int argc, char *argv[]) {
     }
 
     int port = atoi(argv[1]);
+    int pool_size = atoi(argv[2]);
+    int max_queue_size = atoi(argv[3]);
+    int num_of_request = atoi(argv[4]);
     int server_sock;
     struct sockaddr_in srv;
     struct sockaddr_in cli;
@@ -46,16 +51,19 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    while (1) {
+    int counter = 0;
+
+    while (counter++ < num_of_request) {
         int* client_sock = malloc(sizeof(int));
         (*client_sock) = accept(server_sock, (struct sockaddr *)&cli, &client_len);
         if ((*client_sock) < 0) {
             perror("accept");
-            continue;
+            // free
+            exit(1);
         }
         handle_client(client_sock);
-        free(client_sock);
         close(*client_sock);
+        free(client_sock);
     }
 
     close(server_sock);
@@ -63,21 +71,51 @@ int main(int argc, char *argv[]) {
 
 }
 
-int handle_client(int *client_sock) {
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes_read = recv(*client_sock, buffer, sizeof(buffer) - 1, 0);
-
+// handle given request. return -1 if fails, 0 on successes.
+int handle_client(const int *client_sock) {
+    char request[BUFFER_SIZE];
+    ssize_t bytes_read = read(*client_sock, request, BUFFER_SIZE);
     if (bytes_read <= 0) {
         perror("read");
         return -1;
     }
-
-    buffer[bytes_read] = '\0'; // Null-terminate the request.
-
-    // Process the HTTP request here...
-    // Parse the request line, validate, and respond accordingly.
+    char* end_of_first_line = strstr(request, "\r\n");
+    if (end_of_first_line == NULL) {
+        send_response(*client_sock, "400 Bad Request", NULL, NULL);
+        return -1;
+    }
+    end_of_first_line[0] = '\0';
+    if (check_request(request) == 400) {
+        send_response(*client_sock, "400 Bad Request", NULL, NULL);
+    }
 
     send_response(*client_sock, "200 OK", "<h1>Welcome</h1>", "text/html");
+    return 0;
+}
+
+// check if request is a bad request. return 400 on bad request and 0 if good.
+int check_request(char *request) {
+    if (request == NULL) {
+        return 400;
+    }
+    char buffer[BUFFER_SIZE];
+    strncpy(buffer, request, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    char *method = strtok(buffer, " ");
+    char *path = strtok(NULL, " ");
+    char *protocol = strtok(NULL, " ");
+    char *extra = strtok(NULL, " ");
+
+    if (method == NULL || path == NULL || protocol == NULL || extra != NULL) {
+        return 400;
+    }
+
+    if (!isValidHttpVersion(protocol)) {
+        return 400;
+    }
+
+    return 0;
 }
 
 void send_response(int client_sock, const char *status, const char *body, const char *content_type) {
@@ -116,6 +154,22 @@ char *get_mime_type(char *name) {
     if (strcmp(ext, ".mpeg") == 0 || strcmp(ext, ".mpg") == 0) return "video/mpeg";
     if (strcmp(ext, ".mp3") == 0) return "audio/mpeg";
     return NULL;
+}
+
+bool isValidHttpVersion(const char *version) {
+    const char *validVersions[] = {
+            "HTTP/1.0",
+            "HTTP/1.1",
+            "HTTP/2.0",
+            "HTTP/3.0"
+    };
+    size_t numVersions = sizeof(validVersions) / sizeof(validVersions[0]);
+    for (size_t i = 0; i < numVersions; ++i) {
+        if (strcmp(version, validVersions[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 
