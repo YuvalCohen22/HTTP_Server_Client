@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <errno.h>
+#include <libgen.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -10,8 +11,17 @@
 #include <unistd.h>
 #include "threadpool.h"
 
+#define DEBUG 1
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
-#define BUFFER_SIZE 4000
+#define MAX_FIRST_LINE 4000
+
+#if DEBUG
+#define DEBUG_PRINT(fmt, ...) \
+        fprintf(stderr, "DEBUG: " fmt, ##__VA_ARGS__)
+#else
+#define DEBUG_PRINT(fmt, ...) \
+        do { } while (0)
+#endif
 
 int handle_client(const int *client_sock);
 int check_bad_request(char *request, char **path);
@@ -20,6 +30,8 @@ int check_path(char *path);
 void send_response(int client_sock, const char *status, const char *body, const char *content_type);
 char *get_mime_type(char *name);
 bool does_file_exist(char *path, struct stat *stat_buf);
+bool check_permission(char *path);
+int is_index_html_in_directory(const char *directory_path);
 
 int main(int argc, char *argv[]) {
 
@@ -79,8 +91,8 @@ int main(int argc, char *argv[]) {
 
 // handle given request. return -1 if fails, 0 on successes.
 int handle_client(const int *client_sock) {
-    char request[BUFFER_SIZE];
-    ssize_t bytes_read = read(*client_sock, request, BUFFER_SIZE);
+    char request[MAX_FIRST_LINE];
+    ssize_t bytes_read = read(*client_sock, request, MAX_FIRST_LINE);
 
     if (bytes_read <= 0) {
         perror("read");
@@ -93,6 +105,7 @@ int handle_client(const int *client_sock) {
         return -1;
     }
     end_of_first_line[0] = '\0';
+    DEBUG_PRINT("%s\n", request);
     char* path;
 
     int check_req = check_bad_request(request, &path);
@@ -111,51 +124,57 @@ int handle_client(const int *client_sock) {
         send_response(*client_sock, "404 Not Found", NULL, NULL);
     }
 
+    if (checked_path == 302) {
+        send_response(*client_sock, "302 Found", NULL, NULL);
+    }
 
+    if (checked_path == 403) {
+        send_response(*client_sock, "403 Forbidden", NULL, NULL);
+    }
 
-    send_response(*client_sock, "200 OK", "<h1>Welcome</h1>", "text/html");
+    if (checked_path == 200) {
+        send_response(*client_sock, "200 OK", NULL, NULL);
+    }
+
     return 0;
 }
 
 int check_path(char *path) {
     struct stat stat_buf;
 
-    if (does_file_exist(path, &stat_buf)) {
+    if (!does_file_exist(path, &stat_buf)) {
         return 404;
     }
 
     if (S_ISDIR(stat_buf.st_mode)) {
+
         if (path[strlen(path) - 1] != '/') {
             return 302;
         }
-
-        char index_path[PATH_MAX];
-        snprintf(index_path, sizeof(index_path), "%sindex.html", path);
-        if (stat(index_path, &stat_buf) == 0 && S_ISREG(stat_buf.st_mode)) {
-            return 200;
+        if (!check_permission(path))
+            return 403;
+        int check_index_html = is_index_html_in_directory(path);
+        if (is_index_html_in_directory(path) == -1)
+            return 501;
+        if (check_index_html == 1) {
+            strcat(path, "index.html");
+            if (check_permission(path))
+                return 200;
+            return 403;
         }
-
-        return 200;
+        if (check_permission(path))
+            return 200;
+        return 403;
     }
 
     if (S_ISREG(stat_buf.st_mode)) {
 
-        if (access(path, R_OK) != 0) {
+        DEBUG_PRINT("path: %s\n", path);
+
+        if (check_permission(path) == 0) {
             return 403;
         }
-
-        char dir_path[PATH_MAX];
-        strcpy(dir_path, path);
-        char *slash = strrchr(dir_path, '/');
-        if (slash) {
-            *slash = '\0';
-            struct stat dir_stat;
-            if (stat(dir_path, &dir_stat) == 0 && (dir_stat.st_mode & S_IXUSR)) {
-                return 200;
-            }
-        }
-
-        return 403;
+        return 200;
     }
 
     return 404;
@@ -166,7 +185,7 @@ int check_bad_request(char *request, char **path) {
     if (request == NULL) {
         return 400;
     }
-    char buffer[BUFFER_SIZE];
+    char buffer[MAX_FIRST_LINE];
     strncpy(buffer, request, sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
 
@@ -197,7 +216,7 @@ void send_response(int client_sock, const char *status, const char *body, const 
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
 
-    char response[BUFFER_SIZE];
+    char response[MAX_FIRST_LINE];
     int content_length = body ? strlen(body) : 0;
 
     snprintf(response, sizeof(response),
@@ -211,7 +230,7 @@ void send_response(int client_sock, const char *status, const char *body, const 
              "%s",
              status, time_buffer, content_type ? content_type : "text/plain", content_length, body ? body : "");
 
-    send(client_sock, response, strlen(response), 0);
+    send(client_sock, status, strlen(status), 0);
 }
 
 char *get_mime_type(char *name) {
@@ -228,6 +247,21 @@ char *get_mime_type(char *name) {
     if (strcmp(ext, ".mpeg") == 0 || strcmp(ext, ".mpg") == 0) return "video/mpeg";
     if (strcmp(ext, ".mp3") == 0) return "audio/mpeg";
     return NULL;
+}
+
+int create_response(int status_code, char* method) {
+    char *firs_line = "HTTP/1.0";
+    strcat(firs_line, method);
+    strcat(firs_line, "\r\n");
+
+    char* server = "Server: webserver/1.0";
+
+    char* date = "Date: ";
+    char time_buffer[128];
+    time_t now = time(NULL);
+    strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
+    strcat(date, time_buffer);
+
 }
 
 bool isValidHttpVersion(const char *version) {
@@ -249,7 +283,44 @@ bool isValidHttpVersion(const char *version) {
 
 // check if file exists.
 bool does_file_exist(char *path, struct stat *stat_buf) {
-    return stat(path, stat_buf) == 0;
+    DEBUG_PRINT("path: %s\n", path);
+    return stat(path+1, stat_buf) == 0;
 }
+
+bool check_permission(char *path) {
+    char path_copy[MAX_FIRST_LINE];
+    strncpy(path_copy, path, sizeof(path));
+    char* directory = dirname(path_copy);
+    struct stat dir_buf;
+    while (strcmp(directory, "/") != 0) {
+        if (stat(directory, &dir_buf) != 0 || !(dir_buf.st_mode & S_IROTH)){
+            return false;
+        }
+        directory = dirname(directory);
+    }
+    return true;
+
+}
+
+int is_index_html_in_directory(const char *directory_path) {
+    struct dirent *entry;
+    DIR *directory = opendir(directory_path);
+
+    if (directory == NULL) {
+        perror("Unable to open directory");
+        return -1; // Indicate an error
+    }
+
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, "index.html") == 0) {
+            closedir(directory);
+            return 1; // File found
+        }
+    }
+
+    closedir(directory);
+    return 0; // File not found
+}
+
 
 
