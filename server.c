@@ -31,7 +31,7 @@ void send_response(int client_sock, const char *status, const char *body, const 
 char *get_mime_type(char *name);
 bool does_file_exist(char *path, struct stat *stat_buf);
 bool check_permission(char *path);
-int is_index_html_in_directory(const char *directory_path);
+int is_index_html_in_directory(char *directory_path);
 
 int main(int argc, char *argv[]) {
 
@@ -112,28 +112,34 @@ int handle_client(const int *client_sock) {
 
     if (check_req== 400) {
         send_response(*client_sock, "400 Bad Request", NULL, NULL);
+        return 0;
     }
-
-    else if (check_req == 501) {
+    if (check_req == 501) {
         send_response(*client_sock, "501 Not Implemented", NULL, NULL);
+        return 0;
     }
 
     int checked_path = check_path(path);
+    DEBUG_PRINT("checked_path: %d\n", checked_path);
 
     if (checked_path == 404) {
         send_response(*client_sock, "404 Not Found", NULL, NULL);
+        return 0;
     }
 
     if (checked_path == 302) {
         send_response(*client_sock, "302 Found", NULL, NULL);
+        return 0;
     }
 
     if (checked_path == 403) {
         send_response(*client_sock, "403 Forbidden", NULL, NULL);
+        return 0;
     }
 
     if (checked_path == 200) {
         send_response(*client_sock, "200 OK", NULL, NULL);
+        return 0;
     }
 
     return 0;
@@ -155,9 +161,11 @@ int check_path(char *path) {
             return 403;
         int check_index_html = is_index_html_in_directory(path);
         if (is_index_html_in_directory(path) == -1)
-            return 501;
+            return 500;
         if (check_index_html == 1) {
             strcat(path, "index.html");
+            if (!(stat_buf.st_mode & S_IXOTH) || !(stat_buf.st_mode & S_IXGRP) || !(stat_buf.st_mode & S_IXUSR))
+                return 403;
             if (check_permission(path))
                 return 200;
             return 403;
@@ -169,9 +177,7 @@ int check_path(char *path) {
 
     if (S_ISREG(stat_buf.st_mode)) {
 
-        DEBUG_PRINT("path: %s\n", path);
-
-        if (check_permission(path) == 0) {
+        if (!(stat_buf.st_mode & S_IXOTH) || !(stat_buf.st_mode & S_IXGRP) || !(stat_buf.st_mode & S_IXUSR)) {
             return 403;
         }
         return 200;
@@ -206,7 +212,7 @@ int check_bad_request(char *request, char **path) {
         return 501;
     }
 
-    (*path) = found_path;
+    *path = found_path;
 
     return 0;
 }
@@ -261,7 +267,7 @@ int create_response(int status_code, char* method) {
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
     strcat(date, time_buffer);
-
+    return 1;
 }
 
 bool isValidHttpVersion(const char *version) {
@@ -283,28 +289,56 @@ bool isValidHttpVersion(const char *version) {
 
 // check if file exists.
 bool does_file_exist(char *path, struct stat *stat_buf) {
-    DEBUG_PRINT("path: %s\n", path);
     return stat(path+1, stat_buf) == 0;
 }
 
 bool check_permission(char *path) {
-    char path_copy[MAX_FIRST_LINE];
-    strncpy(path_copy, path, sizeof(path));
-    char* directory = dirname(path_copy);
+    size_t path_size = strlen(path) + 1;
+    char path_copy[path_size];
+    strncpy(path_copy, path, path_size);
+    path_copy[path_size - 1] = '\0'; // Ensure null termination
+
+    DEBUG_PRINT("path_copy: %s\n", path_copy);
+
+    char* current_path = path_copy;
+    char* directory = NULL;
     struct stat dir_buf;
-    while (strcmp(directory, "/") != 0) {
-        if (stat(directory, &dir_buf) != 0 || !(dir_buf.st_mode & S_IROTH)){
+
+    do {
+        directory = dirname(current_path);
+        DEBUG_PRINT("directory: %s\n", directory);
+
+        if (stat(directory, &dir_buf) != 0 ||
+            !(dir_buf.st_mode & S_IXOTH) ||
+            !(dir_buf.st_mode & S_IXGRP) ||
+            !(dir_buf.st_mode & S_IXUSR)) {
             return false;
+            }
+
+        // Prepare for next iteration, ensuring not to pass NULL to dirname
+        if (strcmp(directory, "/") != 0) {
+            current_path = directory;
         }
-        directory = dirname(directory);
-    }
+    } while (strcmp(directory, "/") != 0);
+
+    // Final check for "/"
+    if (stat("/", &dir_buf) != 0 ||
+        !(dir_buf.st_mode & S_IXOTH) ||
+        !(dir_buf.st_mode & S_IXGRP) ||
+        !(dir_buf.st_mode & S_IXUSR)) {
+        return false;
+        }
+    DEBUG_PRINT("permission check passed\n");
     return true;
 
 }
 
-int is_index_html_in_directory(const char *directory_path) {
+int is_index_html_in_directory(char *directory_path) {
+    char* copied_dir = dirname(directory_path);
     struct dirent *entry;
-    DIR *directory = opendir(directory_path);
+    DIR *directory = opendir(copied_dir);
+
+    DEBUG_PRINT("directory_path: %s\n", copied_dir);
 
     if (directory == NULL) {
         perror("Unable to open directory");
