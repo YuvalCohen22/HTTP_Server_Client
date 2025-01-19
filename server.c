@@ -395,7 +395,8 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
 
     }
     else if (status_code == 200) {
-        FILE* file = fopen(path, "rb"); // Open the file in binary mode
+        DEBUG_PRINT("path: %s\n", path);
+        FILE* file = fopen(path+1, "rb"); // Open the file in binary mode
         if (!file) {
             perror("Failed to open file");
             *bytes_read = 0;
