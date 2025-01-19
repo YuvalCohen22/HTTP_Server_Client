@@ -28,12 +28,12 @@ int handle_client(const int *client_sock);
 int check_bad_request(char *request, char **path);
 bool isValidHttpVersion(const char *version);
 int check_path(char *path);
-void send_response(int client_sock, const char *status, const char *body, const char *content_type);
+void send_response(int client_sock, char* status, int status_code, char* path);
 char *get_mime_type(char *name);
 bool does_file_exist(char *path, struct stat *stat_buf);
 bool check_permission(char *path);
 int is_index_html_in_directory(char *directory_path);
-char* create_response(char* status, int status_code, char* method, char* path);
+char* create_response(char* status, int status_code, char* path, char* body, size_t body_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
 bool is_directory(char* path);
 
@@ -109,7 +109,7 @@ int handle_client(const int *client_sock) {
 
     char* end_of_first_line = strstr(request, "\r\n");
     if (end_of_first_line == NULL) {
-        send_response(*client_sock, "400 Bad Request", NULL, NULL);
+        send_response(*client_sock, "400 Bad Request", 400, NULL);
         return -1;
     }
     end_of_first_line[0] = '\0';
@@ -119,34 +119,33 @@ int handle_client(const int *client_sock) {
     int check_req = check_bad_request(request, &path);
 
     if (check_req== 400) {
-        send_response(*client_sock, "400 Bad Request", NULL, NULL);
+        send_response(*client_sock, "400 Bad Request", 400, path);
         return 0;
     }
     if (check_req == 501) {
-        send_response(*client_sock, "501 Not Implemented", NULL, NULL);
+        send_response(*client_sock, "501 Not Implemented", 501, path);
         return 0;
     }
 
     int checked_path = check_path(path);
-    DEBUG_PRINT("checked_path: %d\n", checked_path);
 
     if (checked_path == 404) {
-        send_response(*client_sock, "404 Not Found", NULL, NULL);
+        send_response(*client_sock, "404 Not Found", 404, path);
         return 0;
     }
 
     if (checked_path == 302) {
-        send_response(*client_sock, "302 Found", NULL, NULL);
+        send_response(*client_sock, "302 Found", 302, path);
         return 0;
     }
 
     if (checked_path == 403) {
-        send_response(*client_sock, "403 Forbidden", NULL, NULL);
+        send_response(*client_sock, "403 Forbidden", 403, path);
         return 0;
     }
 
     if (checked_path == 200) {
-        send_response(*client_sock, "200 OK", NULL, NULL);
+        send_response(*client_sock, "200 OK", 200, path);
         return 0;
     }
 
@@ -225,10 +224,13 @@ int check_bad_request(char *request, char **path) {
     return 0;
 }
 
-void send_response(int client_sock, const char *status, const char *body, const char *content_type) {
-
-
-    send(client_sock, status, strlen(status), 0);
+void send_response(int client_sock, char* status, int status_code, char* path) {
+    size_t body_size;
+    char* body = get_response_body(status_code, path, &body_size);
+    char* response = create_response(status, status_code, path, body, body_size);
+    send(client_sock, response, strlen(response), 0);
+    free(body);
+    free(response);
 }
 
 char *get_mime_type(char *name) {
@@ -247,9 +249,7 @@ char *get_mime_type(char *name) {
     return NULL;
 }
 
-char* create_response(char* status, int status_code, char* method, char* path) {
-    size_t content_length = 0;
-    char* body = get_response_body(status_code, path, &content_length);
+char* create_response(char* status, int status_code, char* path, char* body, size_t body_size) {
     char time_buffer[128];
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
@@ -277,8 +277,9 @@ char* create_response(char* status, int status_code, char* method, char* path) {
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
-        "\r\n",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", content_length);
+        "\r\n"
+        "%s",
+        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size, body);
 
     // Allocate memory for the response
     char* response = malloc(response_size + 1);
@@ -287,6 +288,7 @@ char* create_response(char* status, int status_code, char* method, char* path) {
         free(body);
         return NULL;
     }
+    //DEBUG_PRINT("body: %s\n", body);
 
     // Build the response string
     snprintf(
@@ -298,8 +300,9 @@ char* create_response(char* status, int status_code, char* method, char* path) {
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
-        "\r\n",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", content_length);
+        "\r\n"
+        "%s",
+        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size, body);
     return response;
 }
 
@@ -331,7 +334,6 @@ bool check_permission(char *path) {
     strncpy(path_copy, path, path_size);
     path_copy[path_size - 1] = '\0'; // Ensure null termination
 
-    DEBUG_PRINT("path_copy: %s\n", path_copy);
 
     char* current_path = path_copy;
     char* directory = NULL;
@@ -339,7 +341,6 @@ bool check_permission(char *path) {
 
     do {
         directory = dirname(current_path);
-        DEBUG_PRINT("directory: %s\n", directory);
 
         if (stat(directory, &dir_buf) != 0 ||
             !(dir_buf.st_mode & S_IXOTH) ||
@@ -371,7 +372,6 @@ int is_index_html_in_directory(char *directory_path) {
     struct dirent *entry;
     DIR *directory = opendir(copied_dir);
 
-    DEBUG_PRINT("directory_path: %s\n", copied_dir);
 
     if (directory == NULL) {
         perror("Unable to open directory");
@@ -390,6 +390,7 @@ int is_index_html_in_directory(char *directory_path) {
 }
 
 char* get_response_body(int status_code, char* path, size_t* bytes_read) {
+    char* body;
     if (status_code == 200 && is_directory(path)) {
 
     }
@@ -420,8 +421,8 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         rewind(file); // Go back to the beginning of the file
 
         // Allocate memory for the file content
-        char* buffer = (char*)malloc(file_size + 1); // +1 for null-terminator
-        if (!buffer) {
+        body = (char*)malloc(file_size + 1); // +1 for null-terminator
+        if (!body) {
             perror("Failed to allocate memory");
             fclose(file);
             *bytes_read = 0;
@@ -429,38 +430,84 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         }
 
         // Read the file content into the buffer
-        *bytes_read = fread(buffer, 1, file_size, file);
+        *bytes_read = fread(body, 1, file_size, file);
         if (*bytes_read != file_size) {
             if (ferror(file)) {
                 perror("Failed to read file");
-                free(buffer);
+                free(body);
                 fclose(file);
                 *bytes_read = 0;
                 return NULL;
             }
         }
 
-        buffer[*bytes_read] = '\0'; // Null-terminate the buffer
+        body[*bytes_read] = '\0'; // Null-terminate the buffer
 
         fclose(file);
-        return buffer;
+        return body;
     }
     else {
         if (status_code == 302) {
-
+            body = (char*)malloc(125);
+            snprintf(
+                body, 125,
+                "<HTML><HEAD><TITLE>302 Found</TITLE></HEAD>\r\n"
+                    "<BODY><H4>302 Found</H4>\r\n"
+                    "Directories must end with a slash.\r\n"
+                    "</BODY></HTML>\r\n");
+            *bytes_read = 125;
         }
         if (status_code == 400) {
-
+            body = (char*)malloc(114);
+            snprintf(
+                body, 114,
+                "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\r\n"
+                    "<BODY><H4>400 Bad request</H4>\r\n"
+                    "Bad Request.\r\n"
+                    "</BODY></HTML>\r\n");
+            *bytes_read = 114;
+        }
+        if (status_code == 403) {
+            body = (char*)malloc(113);
+            snprintf(
+                body, 113,
+                "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n"
+                    "<BODY><H4>404 Not Found</H4>\r\n"
+                    "File not found.\r\n"
+                    "</BODY></HTML>\r\n");
+            *bytes_read = 113;
         }
         if (status_code == 404) {
-
+            body = (char*)malloc(113);
+            snprintf(
+                body, 113,
+                "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n"
+                    "<BODY><H4>404 Not Found</H4>\r\n"
+                    "File not found.\r\n"
+                    "</BODY></HTML>\r\n");
+            *bytes_read = 113;
         }
         if (status_code == 500) {
-
+            body = (char*)malloc(145);
+            snprintf(
+                body, 145,
+                "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\r\n"
+                    "<BODY><H4>500 Internal Server Error</H4>\r\n"
+                    "Some server side error.\r\n"
+                    "</BODY></HTML>\r\n");
+            *bytes_read = 145;
         }
         if (status_code == 501) {
-
+            body = (char*)malloc(130);
+            snprintf(
+                body, 130,
+                "<HTML><HEAD><TITLE>501 Not supported</TITLE></HEAD>\r\n"
+                    "<BODY><H4>501 Not supported</H4>\r\n"
+                    "Method is not supported.\r\n"
+                    "</BODY></HTML>\r\n");
+            *bytes_read = 130;
         }
+        return body;
     }
     return NULL;
 
