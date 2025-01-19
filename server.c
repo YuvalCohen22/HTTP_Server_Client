@@ -33,7 +33,7 @@ char *get_mime_type(char *name);
 bool does_file_exist(char *path, struct stat *stat_buf);
 bool check_permission(char *path);
 int is_index_html_in_directory(char *directory_path);
-char* create_response(char* status, int status_code, char* path, char* body, size_t body_size);
+char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
 bool is_directory(char* path);
 
@@ -127,6 +127,7 @@ int handle_client(const int *client_sock) {
         return 0;
     }
 
+    DEBUG_PRINT("path: %s\n", path);
     int checked_path = check_path(path);
 
     if (checked_path == 404) {
@@ -226,9 +227,14 @@ int check_bad_request(char *request, char **path) {
 
 void send_response(int client_sock, char* status, int status_code, char* path) {
     size_t body_size;
+    size_t total_size;
     char* body = get_response_body(status_code, path, &body_size);
-    char* response = create_response(status, status_code, path, body, body_size);
-    send(client_sock, response, strlen(response), 0);
+    char* response = create_response(status, status_code, path, body, body_size, &total_size);
+    // for (int i =0; i < total_size; i++) {
+    //     DEBUG_PRINT("%c", response[i]);
+    // }
+    DEBUG_PRINT("%d\n", (int)total_size);
+    send(client_sock, response, total_size, 0);
     free(body);
     free(response);
 }
@@ -249,7 +255,7 @@ char *get_mime_type(char *name) {
     return NULL;
 }
 
-char* create_response(char* status, int status_code, char* path, char* body, size_t body_size) {
+char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size) {
     char time_buffer[128];
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
@@ -277,12 +283,11 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size, body);
+        "\r\n",
+        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
 
     // Allocate memory for the response
-    char* response = malloc(response_size + 1);
+    char* response = malloc(response_size + body_size + 1);
     if (!response) {
         perror("malloc");
         free(body);
@@ -291,7 +296,7 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
     //DEBUG_PRINT("body: %s\n", body);
 
     // Build the response string
-    snprintf(
+     snprintf(
         response, response_size + 1,
         "HTTP/1.0 %s\r\n"
         "Server: webserver/1.0\r\n"
@@ -300,9 +305,10 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size, body);
+        "\r\n",
+        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
+    memcpy(response+response_size, body, body_size);
+    *total_size = response_size + body_size + 1;
     return response;
 }
 
@@ -391,11 +397,10 @@ int is_index_html_in_directory(char *directory_path) {
 
 char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     char* body;
+    DEBUG_PRINT("%d %s\n", status_code, path);
     if (status_code == 200 && is_directory(path)) {
-
     }
     else if (status_code == 200) {
-        DEBUG_PRINT("path: %s\n", path);
         FILE* file = fopen(path+1, "rb"); // Open the file in binary mode
         if (!file) {
             perror("Failed to open file");
@@ -469,12 +474,13 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             *bytes_read = 114;
         }
         if (status_code == 403) {
+            DEBUG_PRINT("no permision");
             body = (char*)malloc(113);
             snprintf(
                 body, 113,
-                "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n"
-                    "<BODY><H4>404 Not Found</H4>\r\n"
-                    "File not found.\r\n"
+                "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\r\n"
+                    "<BODY><H4>403 Forbidden</H4>\r\n"
+                    "Access denied.\r\n"
                     "</BODY></HTML>\r\n");
             *bytes_read = 113;
         }
