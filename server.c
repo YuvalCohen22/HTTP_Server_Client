@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <tgmath.h>
 #include <unistd.h>
 #include "threadpool.h"
 
@@ -32,6 +33,9 @@ char *get_mime_type(char *name);
 bool does_file_exist(char *path, struct stat *stat_buf);
 bool check_permission(char *path);
 int is_index_html_in_directory(char *directory_path);
+char* create_response(char* status, int status_code, char* method, char* path);
+char* get_response_body(int status_code, char* path, size_t* bytes_read);
+bool is_directory(char* path);
 
 int main(int argc, char *argv[]) {
 
@@ -73,10 +77,14 @@ int main(int argc, char *argv[]) {
 
     while (counter++ < num_of_request) {
         int* client_sock = malloc(sizeof(int));
+        if (client_sock == NULL) {
+            perror("malloc");
+            exit(1);
+        }
         (*client_sock) = accept(server_sock, (struct sockaddr *)&cli, &client_len);
         if ((*client_sock) < 0) {
             perror("accept");
-            // free
+            free(client_sock);
             exit(1);
         }
         handle_client(client_sock);
@@ -218,23 +226,7 @@ int check_bad_request(char *request, char **path) {
 }
 
 void send_response(int client_sock, const char *status, const char *body, const char *content_type) {
-    char time_buffer[128];
-    time_t now = time(NULL);
-    strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
 
-    char response[MAX_FIRST_LINE];
-    int content_length = body ? strlen(body) : 0;
-
-    snprintf(response, sizeof(response),
-             "HTTP/1.0 %s\r\n"
-             "Server: webserver/1.0\r\n"
-             "Date: %s\r\n"
-             "Content-Type: %s\r\n"
-             "Content-Length: %d\r\n"
-             "Connection: close\r\n"
-             "\r\n"
-             "%s",
-             status, time_buffer, content_type ? content_type : "text/plain", content_length, body ? body : "");
 
     send(client_sock, status, strlen(status), 0);
 }
@@ -255,19 +247,60 @@ char *get_mime_type(char *name) {
     return NULL;
 }
 
-int create_response(int status_code, char* method) {
-    char *firs_line = "HTTP/1.0";
-    strcat(firs_line, method);
-    strcat(firs_line, "\r\n");
-
-    char* server = "Server: webserver/1.0";
-
-    char* date = "Date: ";
+char* create_response(char* status, int status_code, char* method, char* path) {
+    size_t content_length = 0;
+    char* body = get_response_body(status_code, path, &content_length);
     char time_buffer[128];
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
-    strcat(date, time_buffer);
-    return 1;
+
+    const char* content_type;
+    if (status_code != 200) {
+        content_type = "text/html";
+    } else {
+        content_type = is_directory(path) ? "text/html" : get_mime_type(path);
+    }
+
+    // Prepare a Location header if status code is 302
+    char location_header[512] = "";
+    if (status_code == 302) {
+        snprintf(location_header, sizeof(location_header), "Location: %s/\r\n", path);
+    }
+
+    // Calculate total response size
+    size_t response_size = snprintf(
+        NULL, 0,
+        "HTTP/1.0 %s\r\n"
+        "Server: webserver/1.0\r\n"
+        "Date: %s\r\n"
+        "%s" // Location header
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status, time_buffer, location_header, content_type ? content_type : "text/plain", content_length);
+
+    // Allocate memory for the response
+    char* response = malloc(response_size + 1);
+    if (!response) {
+        perror("malloc");
+        free(body);
+        return NULL;
+    }
+
+    // Build the response string
+    snprintf(
+        response, response_size + 1,
+        "HTTP/1.0 %s\r\n"
+        "Server: webserver/1.0\r\n"
+        "Date: %s\r\n"
+        "%s" // Location header
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status, time_buffer, location_header, content_type ? content_type : "text/plain", content_length);
+    return response;
 }
 
 bool isValidHttpVersion(const char *version) {
@@ -356,5 +389,85 @@ int is_index_html_in_directory(char *directory_path) {
     return 0; // File not found
 }
 
+char* get_response_body(int status_code, char* path, size_t* bytes_read) {
+    if (status_code == 200 && is_directory(path)) {
+
+    }
+    else if (status_code == 200) {
+        FILE* file = fopen(path, "rb"); // Open the file in binary mode
+        if (!file) {
+            perror("Failed to open file");
+            *bytes_read = 0;
+            return NULL;
+        }
+
+        // Seek to the end of the file to get its size
+        if (fseek(file, 0, SEEK_END) != 0) {
+            perror("Failed to seek in file");
+            fclose(file);
+            *bytes_read = 0;
+            return NULL;
+        }
+
+        long file_size = ftell(file);
+        if (file_size == -1) {
+            perror("Failed to get file size");
+            fclose(file);
+            *bytes_read = 0;
+            return NULL;
+        }
+
+        rewind(file); // Go back to the beginning of the file
+
+        // Allocate memory for the file content
+        char* buffer = (char*)malloc(file_size + 1); // +1 for null-terminator
+        if (!buffer) {
+            perror("Failed to allocate memory");
+            fclose(file);
+            *bytes_read = 0;
+            return NULL;
+        }
+
+        // Read the file content into the buffer
+        *bytes_read = fread(buffer, 1, file_size, file);
+        if (*bytes_read != file_size) {
+            if (ferror(file)) {
+                perror("Failed to read file");
+                free(buffer);
+                fclose(file);
+                *bytes_read = 0;
+                return NULL;
+            }
+        }
+
+        buffer[*bytes_read] = '\0'; // Null-terminate the buffer
+
+        fclose(file);
+        return buffer;
+    }
+    else {
+        if (status_code == 302) {
+
+        }
+        if (status_code == 400) {
+
+        }
+        if (status_code == 404) {
+
+        }
+        if (status_code == 500) {
+
+        }
+        if (status_code == 501) {
+
+        }
+    }
+    return NULL;
+
+}
+
+bool is_directory(char* path) {
+    return path[strlen(path) - 1] == '/';
+}
 
 
