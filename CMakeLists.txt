@@ -6,4 +6,4 @@ set(CMAKE_C_STANDARD 23)
 add_executable(HTTP_Server_Client
         threadpool.c
         server.c
-        server_tester.c)
+        )

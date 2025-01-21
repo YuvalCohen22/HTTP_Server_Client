@@ -117,6 +117,7 @@ int handle_client(const int *client_sock) {
     char* path;
 
     int check_req = check_bad_request(request, &path);
+    DEBUG_PRINT("PATH: %s\n", path);
 
     if (check_req== 400) {
         send_response(*client_sock, "400 Bad Request", 400, path);
@@ -127,7 +128,6 @@ int handle_client(const int *client_sock) {
         return 0;
     }
 
-    DEBUG_PRINT("path: %s\n", path);
     int checked_path = check_path(path);
 
     if (checked_path == 404) {
@@ -154,10 +154,15 @@ int handle_client(const int *client_sock) {
 }
 
 int check_path(char *path) {
+    DEBUG_PRINT("path check: %s\n", path);
     struct stat stat_buf;
 
-    if (!does_file_exist(path, &stat_buf)) {
-        return 404;
+    if (strlen(path) == 1 && *path == '/')
+        stat(".", &stat_buf);
+    else {
+        if (!does_file_exist(path, &stat_buf)) {
+            return 404;
+        }
     }
 
     if (S_ISDIR(stat_buf.st_mode)) {
@@ -165,29 +170,29 @@ int check_path(char *path) {
         if (path[strlen(path) - 1] != '/') {
             return 302;
         }
-        if (!check_permission(path))
-            return 403;
+        DEBUG_PRINT("path after check: %s\n", path);
         int check_index_html = is_index_html_in_directory(path);
-        if (is_index_html_in_directory(path) == -1)
-            return 500;
         if (check_index_html == 1) {
             strcat(path, "index.html");
-            if (!(stat_buf.st_mode & S_IXOTH) || !(stat_buf.st_mode & S_IXGRP) || !(stat_buf.st_mode & S_IXUSR))
+            stat(path+1, &stat_buf);
+            if (!(stat_buf.st_mode & S_IROTH))
                 return 403;
             if (check_permission(path))
                 return 200;
             return 403;
         }
         if (check_permission(path))
+        {
             return 200;
+        }
         return 403;
     }
 
     if (S_ISREG(stat_buf.st_mode)) {
 
-        if (!(stat_buf.st_mode & S_IXOTH) || !(stat_buf.st_mode & S_IXGRP) || !(stat_buf.st_mode & S_IXUSR)) {
+        if (!(stat_buf.st_mode & S_IROTH) || !check_permission(path))
             return 403;
-        }
+
         return 200;
     }
 
@@ -293,7 +298,6 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
         free(body);
         return NULL;
     }
-    //DEBUG_PRINT("body: %s\n", body);
 
     // Build the response string
      snprintf(
@@ -335,6 +339,7 @@ bool does_file_exist(char *path, struct stat *stat_buf) {
 }
 
 bool check_permission(char *path) {
+    path++;
     size_t path_size = strlen(path) + 1;
     char path_copy[path_size];
     strncpy(path_copy, path, path_size);
@@ -347,59 +352,133 @@ bool check_permission(char *path) {
 
     do {
         directory = dirname(current_path);
+        DEBUG_PRINT("dir in per check: %s\n", directory);
 
-        if (stat(directory, &dir_buf) != 0 ||
-            !(dir_buf.st_mode & S_IXOTH) ||
-            !(dir_buf.st_mode & S_IXGRP) ||
-            !(dir_buf.st_mode & S_IXUSR)) {
+        if (stat(directory, &dir_buf) != 0 || !(dir_buf.st_mode & S_IXOTH))
             return false;
-            }
 
         // Prepare for next iteration, ensuring not to pass NULL to dirname
         if (strcmp(directory, "/") != 0) {
             current_path = directory;
         }
-    } while (strcmp(directory, "/") != 0);
+    } while (strcmp(directory, ".") != 0);
 
-    // Final check for "/"
-    if (stat("/", &dir_buf) != 0 ||
-        !(dir_buf.st_mode & S_IXOTH) ||
-        !(dir_buf.st_mode & S_IXGRP) ||
-        !(dir_buf.st_mode & S_IXUSR)) {
-        return false;
-        }
     DEBUG_PRINT("permission check passed\n");
     return true;
 
 }
 
 int is_index_html_in_directory(char *directory_path) {
-    char* copied_dir = dirname(directory_path);
-    struct dirent *entry;
-    DIR *directory = opendir(copied_dir);
-
-
-    if (directory == NULL) {
-        perror("Unable to open directory");
-        return -1; // Indicate an error
-    }
-
-    while ((entry = readdir(directory)) != NULL) {
-        if (strcmp(entry->d_name, "index.html") == 0) {
-            closedir(directory);
-            return 1; // File found
-        }
-    }
-
-    closedir(directory);
-    return 0; // File not found
+    char copied_path[MAX_FIRST_LINE];
+    sprintf(copied_path, "%sindex.html", directory_path);
+    struct stat file_stat;
+    return does_file_exist(copied_path, &file_stat) ? 1 : 0;
 }
 
 char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     char* body;
     DEBUG_PRINT("%d %s\n", status_code, path);
     if (status_code == 200 && is_directory(path)) {
+        DIR* dir;
+        struct dirent* entry;
+        struct stat file_stat;
+        char* html_template = "<HTML>\n<HEAD><TITLE>Index of %s</TITLE></HEAD>\n\n<BODY>\n<H4>Index of %s</H4>\n\n<table CELLSPACING=8>\n<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\n";
+        char* footer = "</table>\n<HR>\n<ADDRESS>webserver/1.0</ADDRESS>\n</BODY></HTML>\n";
+
+        size_t body_size = 0;
+        size_t template_size = snprintf(NULL, 0, html_template, path, path) + 1;
+
+        body = malloc(template_size);
+        if (!body) {
+            perror("malloc");
+            return NULL;
+        }
+
+        snprintf(body, template_size, html_template, path, path);
+        body_size = strlen(body);
+        bool is_cwd = strlen(path) == 1 && *path == '/';
+        path++;
+        DEBUG_PRINT("path in dir listing: %s\n", path);
+
+        if (is_cwd)
+        {
+            dir = opendir(".");
+            strcpy(path, "");
+        }
+        else
+            dir = opendir(path);
+
+        if (!dir) {
+            perror("opendir");
+            free(body);
+            return NULL;
+        }
+
+        while ((entry = readdir(dir)) != NULL) {
+            DEBUG_PRINT("ENTRY: %s\n", entry->d_name);
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+
+            size_t filepath_len = strlen(path) + strlen(entry->d_name) + 2; // +2 for '/' and '\0'
+            char* filepath = malloc(filepath_len);
+            if (!filepath) {
+                perror("malloc");
+                closedir(dir);
+                free(body);
+                return NULL;
+            }
+
+
+            snprintf(filepath, filepath_len, "%s%s", path, entry->d_name);
+            if (stat(filepath, &file_stat) == -1) {
+                perror("stat");
+                free(filepath);
+                continue;
+            }
+
+            char mod_time[20];
+            strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", localtime(&file_stat.st_mtime));
+
+            char* row_template = "<tr><td><A HREF=\"%s\">%s%s</A></td><td>%s</td><td>%s</td></tr>\n";
+            char size_str[32] = "";
+
+            if (S_ISDIR(file_stat.st_mode)) {
+                size_str[0] = '\0'; // Set size_str as an empty string directly
+            } else {
+                snprintf(size_str, sizeof(size_str), "%ld", file_stat.st_size);
+            }
+
+            size_t row_size = snprintf(NULL, 0, row_template, entry->d_name, entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", mod_time, size_str) + 1;
+            body = realloc(body, body_size + row_size);
+            if (!body) {
+                perror("realloc");
+                free(filepath);
+                closedir(dir);
+                return NULL;
+            }
+
+            snprintf(body + body_size, row_size, row_template, entry->d_name, entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", mod_time, size_str);
+            body_size += row_size - 1;
+
+            free(filepath);
+        }
+
+        if (is_cwd)
+            strcpy(path, "/");
+        closedir(dir);
+
+        size_t footer_size = strlen(footer);
+        body = realloc(body, body_size + footer_size + 1);
+        if (!body) {
+            perror("realloc");
+            return NULL;
+        }
+
+        strcat(body, footer);
+        *bytes_read = body_size + footer_size;
     }
+
     else if (status_code == 200) {
         FILE* file = fopen(path+1, "rb"); // Open the file in binary mode
         if (!file) {
@@ -450,7 +529,6 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         body[*bytes_read] = '\0'; // Null-terminate the buffer
 
         fclose(file);
-        return body;
     }
     else {
         if (status_code == 302) {
@@ -474,7 +552,6 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             *bytes_read = 114;
         }
         if (status_code == 403) {
-            DEBUG_PRINT("no permision");
             body = (char*)malloc(113);
             snprintf(
                 body, 113,
@@ -514,10 +591,8 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
                     "</BODY></HTML>\r\n");
             *bytes_read = 130;
         }
-        return body;
     }
-    return NULL;
-
+    return body;
 }
 
 bool is_directory(char* path) {
