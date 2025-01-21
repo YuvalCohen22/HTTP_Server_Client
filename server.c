@@ -2,13 +2,11 @@
 #include <errno.h>
 #include <libgen.h>
 #include <netinet/in.h>
-#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <stdbool.h>
-#include <tgmath.h>
 #include <unistd.h>
 #include "threadpool.h"
 
@@ -24,23 +22,23 @@
         do { } while (0)
 #endif
 
-int handle_client(const int *client_sock);
-int check_bad_request(char *request, char **path);
+void handle_client(const int *client_sock);
+int check_bad_request(const char *request, char **path);
 bool isValidHttpVersion(const char *version);
 int check_path(char *path);
 void send_response(int client_sock, char* status, int status_code, char* path);
-char *get_mime_type(char *name);
-bool does_file_exist(char *path, struct stat *stat_buf);
-bool check_permission(char *path);
+char *get_mime_type(const char *name);
+bool does_file_exist(const char *path, struct stat *stat_buf);
+bool check_permission(const char *path);
 int is_index_html_in_directory(char *directory_path);
 char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
-bool is_directory(char* path);
+bool is_directory(const char* path);
 
 int main(int argc, char *argv[]) {
 
     if (argc != 5) {
-        printf("Usage: server <port> <pool-size> <max-queue-size> <max-number-of-request>");
+        printf("Usage: server <port> <pool-size> <max-queue-size> <max-number-of-request>\n");
         exit(1);
     }
 
@@ -56,7 +54,7 @@ int main(int argc, char *argv[]) {
     // Create socket
     if ((server_sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
         perror("socket");
-        return -1;
+        exit(1);
     }
 
     memset(&srv, 0, sizeof(srv));
@@ -65,7 +63,8 @@ int main(int argc, char *argv[]) {
     srv.sin_port = htons(port);
 
     if(bind(server_sock, (struct sockaddr*) &srv, sizeof(srv)) < 0) {
-        perror("bind"); exit(1);
+        perror("bind");
+        exit(1);
     }
 
     if(listen(server_sock, 5) < 0) {
@@ -81,8 +80,8 @@ int main(int argc, char *argv[]) {
             perror("malloc");
             exit(1);
         }
-        (*client_sock) = accept(server_sock, (struct sockaddr *)&cli, &client_len);
-        if ((*client_sock) < 0) {
+        *client_sock = accept(server_sock, (struct sockaddr *)&cli, &client_len);
+        if (*client_sock < 0) {
             perror("accept");
             free(client_sock);
             exit(1);
@@ -97,64 +96,62 @@ int main(int argc, char *argv[]) {
 
 }
 
-// handle given request. return -1 if fails, 0 on successes.
-int handle_client(const int *client_sock) {
+// handle given request.
+void handle_client(const int *client_sock) {
     char request[MAX_FIRST_LINE];
     ssize_t bytes_read = read(*client_sock, request, MAX_FIRST_LINE);
 
     if (bytes_read <= 0) {
+        // send 500 todo
         perror("read");
-        return -1;
+        return;
     }
 
     char* end_of_first_line = strstr(request, "\r\n");
     if (end_of_first_line == NULL) {
         send_response(*client_sock, "400 Bad Request", 400, NULL);
-        return -1;
+        return;
     }
     end_of_first_line[0] = '\0';
     DEBUG_PRINT("%s\n", request);
     char* path;
 
-    int check_req = check_bad_request(request, &path);
+    const int check_req = check_bad_request(request, &path);
     DEBUG_PRINT("PATH: %s\n", path);
 
     if (check_req== 400) {
         send_response(*client_sock, "400 Bad Request", 400, path);
-        return 0;
+        return;
     }
     if (check_req == 501) {
         send_response(*client_sock, "501 Not Implemented", 501, path);
-        return 0;
+        return;
     }
 
-    int checked_path = check_path(path);
+    const int checked_path = check_path(path);
 
     if (checked_path == 404) {
         send_response(*client_sock, "404 Not Found", 404, path);
-        return 0;
+        return;
     }
 
     if (checked_path == 302) {
         send_response(*client_sock, "302 Found", 302, path);
-        return 0;
+        return;
     }
 
     if (checked_path == 403) {
         send_response(*client_sock, "403 Forbidden", 403, path);
-        return 0;
+        return;
     }
 
     if (checked_path == 200) {
         send_response(*client_sock, "200 OK", 200, path);
-        return 0;
     }
-
-    return 0;
 }
 
+// check what status code based on path
 int check_path(char *path) {
-    DEBUG_PRINT("path check: %s\n", path);
     struct stat stat_buf;
 
     if (strlen(path) == 1 && *path == '/')
@@ -167,11 +164,14 @@ int check_path(char *path) {
 
     if (S_ISDIR(stat_buf.st_mode)) {
 
-        if (path[strlen(path) - 1] != '/') {
+        if (path[strlen(path) - 1] != '/')
             return 302;
-        }
-        DEBUG_PRINT("path after check: %s\n", path);
-        int check_index_html = is_index_html_in_directory(path);
+
+        const int check_index_html = is_index_html_in_directory(path);
+
+        if (check_index_html < 0)
+            return 500;
+
         if (check_index_html == 1) {
             strcat(path, "index.html");
             stat(path+1, &stat_buf);
@@ -182,9 +182,8 @@ int check_path(char *path) {
             return 403;
         }
         if (check_permission(path))
-        {
             return 200;
-        }
+
         return 403;
     }
 
@@ -200,7 +199,7 @@ int check_path(char *path) {
 }
 
 // check if request is a bad request. return 400 on bad request, 501 on not GET method and 0 if good.
-int check_bad_request(char *request, char **path) {
+int check_bad_request(const char *request, char **path) {
     if (request == NULL) {
         return 400;
     }
@@ -230,7 +229,8 @@ int check_bad_request(char *request, char **path) {
     return 0;
 }
 
-void send_response(int client_sock, char* status, int status_code, char* path) {
+// send response to client
+void send_response(const int client_sock, char* status, const int status_code, char* path) {
     size_t body_size;
     size_t total_size;
     char* body = get_response_body(status_code, path, &body_size);
@@ -244,7 +244,7 @@ void send_response(int client_sock, char* status, int status_code, char* path) {
     free(response);
 }
 
-char *get_mime_type(char *name) {
+char *get_mime_type(const char *name) {
     char *ext = strrchr(name, '.');
     if (!ext) return NULL;
     if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) return "text/html";
@@ -334,13 +334,13 @@ bool isValidHttpVersion(const char *version) {
 
 
 // check if file exists.
-bool does_file_exist(char *path, struct stat *stat_buf) {
+bool does_file_exist(const char *path, struct stat *stat_buf) {
     return stat(path+1, stat_buf) == 0;
 }
 
-bool check_permission(char *path) {
+bool check_permission(const char *path) {
     path++;
-    size_t path_size = strlen(path) + 1;
+    const size_t path_size = strlen(path) + 1;
     char path_copy[path_size];
     strncpy(path_copy, path, path_size);
     path_copy[path_size - 1] = '\0'; // Ensure null termination
@@ -352,7 +352,6 @@ bool check_permission(char *path) {
 
     do {
         directory = dirname(current_path);
-        DEBUG_PRINT("dir in per check: %s\n", directory);
 
         if (stat(directory, &dir_buf) != 0 || !(dir_buf.st_mode & S_IXOTH))
             return false;
@@ -370,7 +369,10 @@ bool check_permission(char *path) {
 
 int is_index_html_in_directory(char *directory_path) {
     char copied_path[MAX_FIRST_LINE];
-    sprintf(copied_path, "%sindex.html", directory_path);
+    if (sprintf(copied_path, "%sindex.html", directory_path) < 0) {
+        perror("sprintf");
+        return -1;
+    }
     struct stat file_stat;
     return does_file_exist(copied_path, &file_stat) ? 1 : 0;
 }
@@ -595,7 +597,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     return body;
 }
 
-bool is_directory(char* path) {
+bool is_directory(const char* path) {
     return path[strlen(path) - 1] == '/';
 }
 
