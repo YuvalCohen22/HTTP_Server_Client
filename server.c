@@ -31,7 +31,7 @@ char *get_mime_type(const char *name);
 bool does_file_exist(const char *path, struct stat *stat_buf);
 bool check_permission(const char *path);
 int is_index_html_in_directory(char *directory_path);
-char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size);
+char* create_response(char* status, int status_code, char* path, size_t body_size, size_t* total_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
 bool is_directory(const char* path);
 
@@ -99,10 +99,10 @@ int main(int argc, char *argv[]) {
 // handle given request.
 void handle_client(const int *client_sock) {
     char request[MAX_FIRST_LINE];
-    ssize_t bytes_read = read(*client_sock, request, MAX_FIRST_LINE);
+    const ssize_t bytes_read = read(*client_sock, request, MAX_FIRST_LINE);
 
     if (bytes_read <= 0) {
-        // send 500 todo
+        send_response(*client_sock, "500 Internal Server Error", 500, NULL);
         perror("read");
         return;
     }
@@ -231,16 +231,16 @@ int check_bad_request(const char *request, char **path) {
 
 // send response to client
 void send_response(const int client_sock, char* status, const int status_code, char* path) {
-    size_t body_size;
+    size_t body_size = 0;
     size_t total_size;
-    char* body = get_response_body(status_code, path, &body_size);
-    char* response = create_response(status, status_code, path, body, body_size, &total_size);
+    //char* body = get_response_body(status_code, path, &body_size);
+    char* response = create_response(status, status_code, path, body_size, &total_size);
     // for (int i =0; i < total_size; i++) {
     //     DEBUG_PRINT("%c", response[i]);
     // }
-    DEBUG_PRINT("%d\n", (int)total_size);
+    //DEBUG_PRINT("%d\n", (int)total_size);
     send(client_sock, response, total_size, 0);
-    free(body);
+    //free(body);
     free(response);
 }
 
@@ -260,9 +260,9 @@ char *get_mime_type(const char *name) {
     return NULL;
 }
 
-char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size) {
+char* create_response(char* status, int status_code, char* path, const size_t body_size, size_t* total_size) {
     char time_buffer[128];
-    time_t now = time(NULL);
+    const time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
 
     const char* content_type;
@@ -279,7 +279,7 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
     }
 
     // Calculate total response size
-    size_t response_size = snprintf(
+    const size_t response_size = snprintf(
         NULL, 0,
         "HTTP/1.0 %s\r\n"
         "Server: webserver/1.0\r\n"
@@ -292,10 +292,10 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
         status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
 
     // Allocate memory for the response
-    char* response = malloc(response_size + body_size + 1);
+    char* response = malloc(response_size + 1);
     if (!response) {
         perror("malloc");
-        free(body);
+        create_response("500 Internal Server Error", 500, NULL, 0, total_size);
         return NULL;
     }
 
@@ -311,8 +311,8 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
         "Connection: close\r\n"
         "\r\n",
         status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
-    memcpy(response+response_size, body, body_size);
-    *total_size = response_size + body_size + 1;
+    DEBUG_PRINT("response: %s", response);
+    *total_size = body_size + response_size + 1;
     return response;
 }
 
@@ -323,7 +323,7 @@ bool isValidHttpVersion(const char *version) {
             "HTTP/2.0",
             "HTTP/3.0"
     };
-    size_t numVersions = sizeof(validVersions) / sizeof(validVersions[0]);
+    const size_t numVersions = sizeof(validVersions) / sizeof(validVersions[0]);
     for (size_t i = 0; i < numVersions; ++i) {
         if (strcmp(version, validVersions[i]) == 0) {
             return true;
@@ -377,7 +377,7 @@ int is_index_html_in_directory(char *directory_path) {
     return does_file_exist(copied_path, &file_stat) ? 1 : 0;
 }
 
-char* get_response_body(int status_code, char* path, size_t* bytes_read) {
+char* get_response_body(const int status_code, char* path, size_t* bytes_read) {
     char* body;
     DEBUG_PRINT("%d %s\n", status_code, path);
     if (status_code == 200 && is_directory(path)) {
@@ -390,7 +390,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         size_t body_size = 0;
         size_t template_size = snprintf(NULL, 0, html_template, path, path) + 1;
 
-        body = malloc(template_size);
+        body = (char*)malloc(template_size);
         if (!body) {
             perror("malloc");
             return NULL;
@@ -400,7 +400,6 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         body_size = strlen(body);
         bool is_cwd = strlen(path) == 1 && *path == '/';
         path++;
-        DEBUG_PRINT("path in dir listing: %s\n", path);
 
         if (is_cwd)
         {
@@ -470,7 +469,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             strcpy(path, "/");
         closedir(dir);
 
-        size_t footer_size = strlen(footer);
+        const size_t footer_size = strlen(footer);
         body = realloc(body, body_size + footer_size + 1);
         if (!body) {
             perror("realloc");
@@ -497,7 +496,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             return NULL;
         }
 
-        long file_size = ftell(file);
+        const long file_size = ftell(file);
         if (file_size == -1) {
             perror("Failed to get file size");
             fclose(file);
@@ -599,6 +598,28 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
 
 bool is_directory(const char* path) {
     return path[strlen(path) - 1] == '/';
+}
+
+size_t get_body_size(int status_code, char* path) {
+
+    if (status_code == 302)
+        return 125;
+    if (status_code == 400)
+        return 114;
+    if (status_code == 403)
+        return 113;
+    if (status_code == 404)
+        return 113;
+    if (status_code == 500)
+        return 145;
+    if (status_code == 501)
+        return 130;
+
+    if (is_directory(path))
+    {
+
+    }
+
 }
 
 
