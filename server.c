@@ -284,11 +284,19 @@ char* create_response(char* status, const int status_code, char* path, char* bod
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
 
-    const char* content_type;
-    if (status_code != 200) {
-        content_type = "text/html";
-    } else {
-        content_type = is_directory(path) ? "text/html" : get_mime_type(path);
+    char content_type[512] = "";
+    char* temp;
+
+    if (status_code == 200 && is_directory(path))
+        strcpy(content_type, "Content-Type: text/html\r\n");
+    else if (status_code == 200){
+        temp = get_mime_type(path);
+        if (temp != NULL) {
+            strcpy(content_type, "Content-Type: ");
+            strcat(content_type, temp);
+            strcat(content_type, "\r\n");
+        }
+
     }
 
     char location_header[512] = "";
@@ -301,20 +309,18 @@ char* create_response(char* status, const int status_code, char* path, char* bod
         "HTTP/1.0 %s\r\n"
         "Server: webserver/1.0\r\n"
         "Date: %s\r\n"
-        "%s" // Location header
-        "Content-Type: %s\r\n"
+        "%s"
+        "%s"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
+        status, time_buffer, location_header, content_type, body_size);
 
-
-
-    *total_size = response_size + 1;
+    *total_size = response_size;
     if (body != NULL)
         *total_size += body_size;
 
-    char* response = (char*)malloc(*total_size);
+    char* response = (char*)malloc(*total_size + 1);
 
     if (!response) {
         perror("malloc");
@@ -323,21 +329,19 @@ char* create_response(char* status, const int status_code, char* path, char* bod
     }
 
      snprintf(
-        response, *total_size,
+        response, *total_size + 1,
         "HTTP/1.0 %s\r\n"
         "Server: webserver/1.0\r\n"
         "Date: %s\r\n"
-        "%s" // Location header
-        "Content-Type: %s\r\n"
+        "%s"
+        "%s"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
+        status, time_buffer, location_header, content_type, body_size);
 
     if (body != NULL)
         memcpy(response+response_size, body, body_size);
-
-    response[*total_size] = '\0';
 
     return response;
 }
@@ -608,8 +612,9 @@ int send_file_to_socket(const char *path, size_t file_size, int client_socket) {
         return -1;
     }
 
-    char buffer[4096]; // Adjust buffer size based on your needs
+    char buffer[MAX_FIRST_LINE] = {0}; // Adjust buffer size based on your needs
     ssize_t bytes_read;
+    ssize_t bytes_total = 0;
 
     while ((bytes_read = read(file_descriptor, buffer, sizeof(buffer))) > 0) {
         ssize_t total_written = 0;
@@ -622,8 +627,10 @@ int send_file_to_socket(const char *path, size_t file_size, int client_socket) {
             }
             total_written += bytes_written;
         }
+        bytes_total += total_written;
         DEBUG_PRINT("bytes read and sent: %zd\n", bytes_read);
     }
+    DEBUG_PRINT("total: %zu\n", bytes_total);
 
     if (bytes_read < 0) {
         perror("Failed to read from file");
