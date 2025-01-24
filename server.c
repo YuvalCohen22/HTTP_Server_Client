@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include "threadpool.h"
@@ -34,6 +35,7 @@ int is_index_html_in_directory(char *directory_path);
 char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
 bool is_directory(const char* path);
+int send_file_to_socket(const char *file_path, size_t file_size, int socket_fd);
 
 int main(int argc, char *argv[]) {
 
@@ -73,6 +75,8 @@ int main(int argc, char *argv[]) {
     }
 
     int counter = 0;
+
+    //struct _threadpool_st* threadpool_st = create_threadpool(pool_size, max_queue_size);
 
     while (counter++ < num_of_request) {
         int* client_sock = malloc(sizeof(int));
@@ -233,22 +237,31 @@ int check_bad_request(const char *request, char **path) {
 void send_response(const int client_sock, char* status, const int status_code, char* path) {
     size_t body_size;
     size_t total_size;
-
+    char* response;
     char* body = get_response_body(status_code, path, &body_size);
-    if (body == NULL)
+    if (status_code == 200 && !is_directory(path))
+        response = create_response(status, status_code, path, NULL, body_size, &total_size);
+    else
+        response = create_response(status, status_code, path, body, body_size, &total_size);
+    if (response == NULL)
         send_response(client_sock, "500 Internal Server Error", 500, NULL);
-
-    char* response = create_response(status, status_code, path, body, body_size, &total_size);
-    if (response == NULL) {
-        free(body);
-        send_response(client_sock, "500 Internal Server Error", 500, NULL);
-    }
+    // for (int i =0; i < total_size; i++) {
+    //     DEBUG_PRINT("%c", response[i]);
+    // }
+    DEBUG_PRINT("%d\n", (int)total_size);
+    DEBUG_PRINT("bytes: %zu\n", body_size);
     send(client_sock, response, total_size, 0);
-    free(body);
+    if (status_code == 200 && !is_directory(path)) {
+        if (send_file_to_socket(path + 1, body_size, client_sock) == -1)
+            send_response(client_sock, "500 Internal Server Error", 500, NULL);
+    }
+    else
+        free(body);
     free(response);
 }
 
-// checks file type
+
+// check what type is a file
 char *get_mime_type(const char *name) {
     char *ext = strrchr(name, '.');
     if (!ext) return NULL;
@@ -265,17 +278,25 @@ char *get_mime_type(const char *name) {
     return NULL;
 }
 
-// creates response
-char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size) {
+// create and return response
+char* create_response(char* status, const int status_code, char* path, char* body, size_t body_size, size_t* total_size) {
     char time_buffer[128];
     time_t now = time(NULL);
     strftime(time_buffer, sizeof(time_buffer), RFC1123FMT, gmtime(&now));
 
-    const char* content_type;
-    if (status_code != 200) {
-        content_type = "text/html";
-    } else {
-        content_type = is_directory(path) ? "text/html" : get_mime_type(path);
+    char content_type[512] = "";
+    char* temp;
+
+    if (status_code == 200 && is_directory(path))
+        strcpy(content_type, "Content-Type: text/html\r\n");
+    else if (status_code == 200){
+        temp = get_mime_type(path);
+        if (temp != NULL) {
+            strcpy(content_type, "Content-Type: ");
+            strcat(content_type, temp);
+            strcat(content_type, "\r\n");
+        }
+
     }
 
     char location_header[512] = "";
@@ -289,13 +310,18 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
         "Server: webserver/1.0\r\n"
         "Date: %s\r\n"
         "%s"
-        "Content-Type: %s\r\n"
+        "%s"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
+        status, time_buffer, location_header, content_type, body_size);
 
-    char* response = malloc(response_size + body_size + 1);
+    *total_size = response_size;
+    if (body != NULL)
+        *total_size += body_size;
+
+    char* response = (char*)malloc(*total_size + 1);
+
     if (!response) {
         perror("malloc");
         free(body);
@@ -303,22 +329,24 @@ char* create_response(char* status, int status_code, char* path, char* body, siz
     }
 
      snprintf(
-        response, response_size + 1,
+        response, *total_size + 1,
         "HTTP/1.0 %s\r\n"
         "Server: webserver/1.0\r\n"
         "Date: %s\r\n"
         "%s"
-        "Content-Type: %s\r\n"
+        "%s"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n",
-        status, time_buffer, location_header, content_type ? content_type : "text/plain", body_size);
-    memcpy(response+response_size, body, body_size);
-    *total_size = response_size + body_size + 1;
+        status, time_buffer, location_header, content_type, body_size);
+
+    if (body != NULL)
+        memcpy(response+response_size, body, body_size);
+
     return response;
 }
 
-// check if request http version is valid
+// check if request uses valid http version
 bool isValidHttpVersion(const char *version) {
     const char *validVersions[] = {
             "HTTP/1.0",
@@ -335,12 +363,13 @@ bool isValidHttpVersion(const char *version) {
     return false;
 }
 
+
 // check if file exists.
 bool does_file_exist(const char *path, struct stat *stat_buf) {
     return stat(path+1, stat_buf) == 0;
 }
 
-// check permissions for entire path
+// check permission for all in path
 bool check_permission(const char *path) {
     path++;
     const size_t path_size = strlen(path) + 1;
@@ -369,7 +398,7 @@ bool check_permission(const char *path) {
 
 }
 
-// check if index.html in given directory path
+// check if directory has file index.html
 int is_index_html_in_directory(char *directory_path) {
     char copied_path[MAX_FIRST_LINE];
     if (sprintf(copied_path, "%sindex.html", directory_path) < 0) {
@@ -380,7 +409,7 @@ int is_index_html_in_directory(char *directory_path) {
     return does_file_exist(copied_path, &file_stat) ? 1 : 0;
 }
 
-// return response body
+// returns response body
 char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     char* body;
     DEBUG_PRINT("%d %s\n", status_code, path);
@@ -394,7 +423,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         size_t body_size = 0;
         size_t template_size = snprintf(NULL, 0, html_template, path, path) + 1;
 
-        body = malloc(template_size);
+        body = (char*)malloc(template_size);
         if (!body) {
             perror("malloc");
             return NULL;
@@ -404,8 +433,10 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         body_size = strlen(body);
         bool is_cwd = strlen(path) == 1 && *path == '/';
         path++;
+        DEBUG_PRINT("path in dir listing: %s\n", path);
 
-        if (is_cwd) {
+        if (is_cwd)
+        {
             dir = opendir(".");
             strcpy(path, "");
         }
@@ -423,7 +454,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
                 continue;
             }
 
-            size_t filepath_len = strlen(path) + strlen(entry->d_name) + 2; // +2 for '/' and '\0'
+            size_t filepath_len = strlen(path) + strlen(entry->d_name) + 2;
             char* filepath = malloc(filepath_len);
             if (!filepath) {
                 perror("malloc");
@@ -447,7 +478,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             char size_str[32] = "";
 
             if (S_ISDIR(file_stat.st_mode)) {
-                size_str[0] = '\0'; // Set size_str as an empty string directly
+                size_str[0] = '\0';
             } else {
                 snprintf(size_str, sizeof(size_str), "%ld", file_stat.st_size);
             }
@@ -483,55 +514,22 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     }
 
     else if (status_code == 200) {
-        FILE* file = fopen(path+1, "rb"); // Open the file in binary mode
+        path++;
+        FILE *file = fopen(path, "rb");
         if (!file) {
-            perror("Failed to open file");
+            perror("open file");
             *bytes_read = 0;
             return NULL;
         }
 
-        // Seek to the end of the file to get its size
-        if (fseek(file, 0, SEEK_END) != 0) {
-            perror("Failed to seek in file");
-            fclose(file);
-            *bytes_read = 0;
-            return NULL;
-        }
+        fseek(file, 0, SEEK_END);
+        *bytes_read = ftell(file);
 
-        long file_size = ftell(file);
-        if (file_size == -1) {
-            perror("Failed to get file size");
-            fclose(file);
-            *bytes_read = 0;
-            return NULL;
-        }
-
-        rewind(file); // Go back to the beginning of the file
-
-        // Allocate memory for the file content
-        body = (char*)malloc(file_size + 1); // +1 for null-terminator
-        if (!body) {
-            perror("Failed to allocate memory");
-            fclose(file);
-            *bytes_read = 0;
-            return NULL;
-        }
-
-        // Read the file content into the buffer
-        *bytes_read = fread(body, 1, file_size, file);
-        if (*bytes_read != file_size) {
-            if (ferror(file)) {
-                perror("Failed to read file");
-                free(body);
-                fclose(file);
-                *bytes_read = 0;
-                return NULL;
-            }
-        }
-
-        body[*bytes_read] = '\0'; // Null-terminate the buffer
+        rewind(file);
 
         fclose(file);
+
+        return "";
     }
 
     else {
@@ -600,9 +598,49 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     return body;
 }
 
-// checks if path is a directory
+// check if path end in directory
 bool is_directory(const char* path) {
     return path[strlen(path) - 1] == '/';
 }
+
+// send file contents to client
+int send_file_to_socket(const char *path, size_t file_size, int client_socket) {
+    DEBUG_PRINT("bytes: %zu\n", file_size);
+    int file_descriptor = open(path, O_RDONLY);
+    if (file_descriptor < 0) {
+        perror("Failed to open file");
+        return -1;
+    }
+
+    char buffer[MAX_FIRST_LINE] = {0}; // Adjust buffer size based on your needs
+    ssize_t bytes_read;
+    ssize_t bytes_total = 0;
+
+    while ((bytes_read = read(file_descriptor, buffer, sizeof(buffer))) > 0) {
+        ssize_t total_written = 0;
+        while (total_written < bytes_read) {
+            ssize_t bytes_written = write(client_socket, buffer + total_written, bytes_read - total_written);
+            if (bytes_written < 0) {
+                perror("Failed to send data to socket");
+                close(file_descriptor);
+                return -1;
+            }
+            total_written += bytes_written;
+        }
+        bytes_total += total_written;
+        DEBUG_PRINT("bytes read and sent: %zd\n", bytes_read);
+    }
+    DEBUG_PRINT("total: %zu\n", bytes_total);
+
+    if (bytes_read < 0) {
+        perror("Failed to read from file");
+        close(file_descriptor);
+        return -1;
+    }
+
+    close(file_descriptor);
+    return 0;
+}
+
 
 
