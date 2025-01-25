@@ -159,8 +159,9 @@ int handle_client(void* arg) {
     }
 
     end:
-    free(arg);
+    DEBUG_PRINT("CLOSING SOCKET: %d/n", *client_sock);
     close(*client_sock);
+    free(arg);
     return 0;
 }
 
