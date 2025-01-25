@@ -13,7 +13,7 @@
 #include <unistd.h>
 #include "threadpool.h"
 
-#define DEBUG 0
+#define DEBUG 1
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define MAX_FIRST_LINE 4000
 
@@ -159,7 +159,7 @@ int handle_client(void* arg) {
     }
 
     end:
-    DEBUG_PRINT("CLOSING SOCKET: %d/n", *client_sock);
+    DEBUG_PRINT("CLOSING SOCKET: %d\n", *client_sock);
     close(*client_sock);
     free(arg);
     return 0;
@@ -419,6 +419,8 @@ int is_index_html_in_directory(char *directory_path) {
 char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     char* body;
     DEBUG_PRINT("%d %s\n", status_code, path);
+
+    // dirctory listing
     if (status_code == 200 && is_directory(path)) {
         DIR* dir;
         struct dirent* entry;
@@ -480,7 +482,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             char mod_time[20];
             strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", localtime(&file_stat.st_mtime));
 
-            char* row_template = "<tr><td><A HREF=\"%s\">%s%s</A></td><td>%s</td><td>%s</td></tr>\n";
+            char* row_template = "<tr><td><A HREF=\"%s%s\">%s%s</A></td><td>%s</td><td>%s</td></tr>\n";
             char size_str[32] = "";
 
             if (S_ISDIR(file_stat.st_mode)) {
@@ -489,7 +491,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
                 snprintf(size_str, sizeof(size_str), "%ld", file_stat.st_size);
             }
 
-            size_t row_size = snprintf(NULL, 0, row_template, entry->d_name, entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", mod_time, size_str) + 1;
+            size_t row_size = snprintf(NULL, 0, row_template, entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", mod_time, size_str) + 1;
             body = realloc(body, body_size + row_size);
             if (!body) {
                 perror("realloc");
@@ -498,7 +500,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
                 return NULL;
             }
 
-            snprintf(body + body_size, row_size, row_template, entry->d_name, entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", mod_time, size_str);
+            snprintf(body + body_size, row_size, row_template, entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", entry->d_name, S_ISDIR(file_stat.st_mode) ? "/" : "", mod_time, size_str);
             body_size += row_size - 1;
 
             free(filepath);
@@ -519,6 +521,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         *bytes_read = body_size + footer_size;
     }
 
+    // file
     else if (status_code == 200) {
         path++;
         FILE *file = fopen(path, "rb");
@@ -538,6 +541,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         return "";
     }
 
+    // errors
     else {
         if (status_code == 302) {
             body = (char*)malloc(125);
