@@ -11,7 +11,7 @@
 #include <unistd.h>
 #include "threadpool.h"
 
-#define DEBUG 1
+#define DEBUG 0
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define MAX_FIRST_LINE 4000
 
@@ -23,7 +23,7 @@
         do { } while (0)
 #endif
 
-void handle_client(const int *client_sock);
+int handle_client(void* arg);
 int check_bad_request(const char *request, char **path);
 bool isValidHttpVersion(const char *version);
 int check_path(char *path);
@@ -76,7 +76,7 @@ int main(int argc, char *argv[]) {
 
     int counter = 0;
 
-    //struct _threadpool_st* threadpool_st = create_threadpool(pool_size, max_queue_size);
+    struct _threadpool_st* threadpool_st = create_threadpool(pool_size, max_queue_size);
 
     while (counter++ < num_of_request) {
         int* client_sock = malloc(sizeof(int));
@@ -85,36 +85,40 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
         *client_sock = accept(server_sock, (struct sockaddr *)&cli, &client_len);
+        DEBUG_PRINT("socket = %d\n", *client_sock);
         if (*client_sock < 0) {
             perror("accept");
             free(client_sock);
             exit(1);
         }
-        handle_client(client_sock);
-        close(*client_sock);
-        free(client_sock);
+        dispatch(threadpool_st, handle_client, client_sock);
+        DEBUG_PRINT("COUNTER: %d\n", counter);
     }
 
+    DEBUG_PRINT("ENDDDDDDDDDDDDDDDD");
     close(server_sock);
+    destroy_threadpool(threadpool_st);
     return 0;
 
 }
 
 // handle given request.
-void handle_client(const int *client_sock) {
+int handle_client(void* arg) {
+    int* client_sock = (int*)arg;
+    DEBUG_PRINT("socket = %d\n", *client_sock);
     char request[MAX_FIRST_LINE];
     ssize_t bytes_read = read(*client_sock, request, MAX_FIRST_LINE);
 
     if (bytes_read <= 0) {
         send_response(*client_sock, "500 Internal Server Error", 500, NULL);
         perror("read");
-        return;
+        goto end;
     }
 
     char* end_of_first_line = strstr(request, "\r\n");
     if (end_of_first_line == NULL) {
         send_response(*client_sock, "400 Bad Request", 400, NULL);
-        return;
+        goto end;
     }
     end_of_first_line[0] = '\0';
     DEBUG_PRINT("%s\n", request);
@@ -125,33 +129,36 @@ void handle_client(const int *client_sock) {
 
     if (check_req== 400) {
         send_response(*client_sock, "400 Bad Request", 400, path);
-        return;
+        goto end;
     }
     if (check_req == 501) {
         send_response(*client_sock, "501 Not Implemented", 501, path);
-        return;
+        goto end;
     }
+
 
     const int checked_path = check_path(path);
 
     if (checked_path == 404) {
         send_response(*client_sock, "404 Not Found", 404, path);
-        return;
     }
 
-    if (checked_path == 302) {
+    else if (checked_path == 302) {
         send_response(*client_sock, "302 Found", 302, path);
-        return;
     }
 
-    if (checked_path == 403) {
+    else if (checked_path == 403) {
         send_response(*client_sock, "403 Forbidden", 403, path);
-        return;
     }
 
-    if (checked_path == 200) {
+    else if (checked_path == 200) {
         send_response(*client_sock, "200 OK", 200, path);
     }
+
+    end:
+    free(arg);
+    close(*client_sock);
+    return 0;
 }
 
 // check what status code based on path
@@ -245,9 +252,6 @@ void send_response(const int client_sock, char* status, const int status_code, c
         response = create_response(status, status_code, path, body, body_size, &total_size);
     if (response == NULL)
         send_response(client_sock, "500 Internal Server Error", 500, NULL);
-    // for (int i =0; i < total_size; i++) {
-    //     DEBUG_PRINT("%c", response[i]);
-    // }
     DEBUG_PRINT("%d\n", (int)total_size);
     DEBUG_PRINT("bytes: %zu\n", body_size);
     send(client_sock, response, total_size, 0);
@@ -287,16 +291,15 @@ char* create_response(char* status, const int status_code, char* path, char* bod
     char content_type[512] = "";
     char* temp;
 
-    if (status_code == 200 && is_directory(path))
+    if ((status_code == 200 && is_directory(path)) || status_code != 200)
         strcpy(content_type, "Content-Type: text/html\r\n");
-    else if (status_code == 200){
+    else {
         temp = get_mime_type(path);
         if (temp != NULL) {
             strcpy(content_type, "Content-Type: ");
             strcat(content_type, temp);
             strcat(content_type, "\r\n");
         }
-
     }
 
     char location_header[512] = "";
@@ -628,7 +631,6 @@ int send_file_to_socket(const char *path, size_t file_size, int client_socket) {
             total_written += bytes_written;
         }
         bytes_total += total_written;
-        DEBUG_PRINT("bytes read and sent: %zd\n", bytes_read);
     }
     DEBUG_PRINT("total: %zu\n", bytes_total);
 

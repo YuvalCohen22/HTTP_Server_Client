@@ -18,12 +18,12 @@ threadpool.h
 
 --Main Function--
 
-Creates server socket, bind, listen and for every request it accepts and dispach a thread to handle_client.
+Creates server socket, bind, listen and for every request it accepts and dispatch a thread to handle_client.
 In handle_client the program checks the request and using multiple function and call send_response.
 
 --How To Compile--
-run gcc server.c threadpool.c -o server
+run gcc -Wall -lpthread server.c threadpool.c -o server
 
 --How To Run--
-run './client [–r n <pr1=value1 pr2=value2 …>] <URL>
-Example: ./client -r 3 addr=jecrusalem tel=02-6655443 age=23 http://httpbin.org/anything
+run ./server <port> <pool-size> <max-queue-size> <max-number-of-request>
+Example: ./server 1234 4 10 100
