@@ -1,3 +1,5 @@
+//323071043
+
 #include <dirent.h>
 #include <errno.h>
 #include <libgen.h>
@@ -35,19 +37,22 @@ int is_index_html_in_directory(char *directory_path);
 char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
 bool is_directory(const char* path);
-int send_file_to_socket(const char *file_path, size_t file_size, int socket_fd);
+int send_file_to_socket(const char *file_path, size_t file_size, int client_socket);
 
 int main(int argc, char *argv[]) {
 
+    // check user usage
     if (argc != 5) {
         printf("Usage: server <port> <pool-size> <max-queue-size> <max-number-of-request>\n");
         exit(1);
     }
 
+    // init variables
     int port = atoi(argv[1]);
     int pool_size = atoi(argv[2]);
     int max_queue_size = atoi(argv[3]);
     int num_of_request = atoi(argv[4]);
+
     int server_sock;
     struct sockaddr_in srv;
     struct sockaddr_in cli;
@@ -95,7 +100,6 @@ int main(int argc, char *argv[]) {
         DEBUG_PRINT("COUNTER: %d\n", counter);
     }
 
-    DEBUG_PRINT("ENDDDDDDDDDDDDDDDD");
     close(server_sock);
     destroy_threadpool(threadpool_st);
     return 0;
@@ -135,7 +139,6 @@ int handle_client(void* arg) {
         send_response(*client_sock, "501 Not Implemented", 501, path);
         goto end;
     }
-
 
     const int checked_path = check_path(path);
 
@@ -365,7 +368,6 @@ bool isValidHttpVersion(const char *version) {
     }
     return false;
 }
-
 
 // check if file exists.
 bool does_file_exist(const char *path, struct stat *stat_buf) {
@@ -615,7 +617,7 @@ int send_file_to_socket(const char *path, size_t file_size, int client_socket) {
         return -1;
     }
 
-    char buffer[MAX_FIRST_LINE] = {0}; // Adjust buffer size based on your needs
+    char buffer[MAX_FIRST_LINE] = {0};
     ssize_t bytes_read;
     ssize_t bytes_total = 0;
 
