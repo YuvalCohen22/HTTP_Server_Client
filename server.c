@@ -13,7 +13,7 @@
 #include <unistd.h>
 #include "threadpool.h"
 
-#define DEBUG 1
+#define DEBUG 0
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define MAX_FIRST_LINE 4000
 
@@ -169,6 +169,8 @@ int handle_client(void* arg) {
 int check_path(char *path) {
     struct stat stat_buf;
 
+    DEBUG_PRINT("PATH IN CHECK PATH %s\n", path);
+
     if (strlen(path) == 1 && *path == '/')
         stat(".", &stat_buf);
     else {
@@ -202,15 +204,10 @@ int check_path(char *path) {
         return 403;
     }
 
-    if (S_ISREG(stat_buf.st_mode)) {
+    if (!S_ISREG(stat_buf.st_mode) || !(stat_buf.st_mode & S_IROTH) || !(stat_buf.st_mode & S_IRUSR) || !(stat_buf.st_mode & S_IRGRP) || !check_permission(path))
+        return 403;
 
-        if (!(stat_buf.st_mode & S_IROTH) || !(stat_buf.st_mode & S_IRUSR) || !(stat_buf.st_mode & S_IRGRP) || !check_permission(path))
-            return 403;
-
-        return 200;
-    }
-
-    return 404;
+    return 200;
 }
 
 // check if request is a bad request. return 400 on bad request, 501 on not GET method and 0 if good.
@@ -310,7 +307,7 @@ char* create_response(char* status, const int status_code, char* path, char* bod
         snprintf(location_header, sizeof(location_header), "Location: %s/\r\n", path);
     }
 
-    char mod_time[20];
+    char mod_time[30];
     char real_mod_time[40];
     strcpy(real_mod_time, "\n");
 
@@ -320,6 +317,7 @@ char* create_response(char* status, const int status_code, char* path, char* bod
     if (status_code == 200){
 
         struct stat file_stat;
+        struct tm tm_time;
 
         if (stat(path+1, &file_stat) == -1) {
             perror("stat");
@@ -327,8 +325,10 @@ char* create_response(char* status, const int status_code, char* path, char* bod
             return NULL;
         }
 
-        strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", localtime(&file_stat.st_mtime));
-        strcpy(real_mod_time, "Last-Modified: ");
+        gmtime_r(&file_stat.st_mtime, &tm_time);
+
+        strftime(mod_time, sizeof(mod_time), RFC1123FMT, &tm_time);
+        strcpy(real_mod_time, "last-modified: ");
         strcat(real_mod_time, mod_time);
         strcat(real_mod_time, "\n");
     }
@@ -396,6 +396,7 @@ bool isValidHttpVersion(const char *version) {
 
 // check if file exists.
 bool does_file_exist(const char *path, struct stat *stat_buf) {
+    DEBUG_PRINT("PATH IN DOES FILE %s\n", path+1);
     return stat(path+1, stat_buf) == 0;
 }
 
@@ -450,8 +451,8 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
         DIR* dir;
         struct dirent* entry;
         struct stat file_stat;
-        char* html_template = "<HTML>\n<HEAD><TITLE>Index of %s</TITLE></HEAD>\n\n<BODY>\n<H4>Index of %s</H4>\n\n<table CELLSPACING=8>\n<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\n";
-        char* footer = "</table>\n<HR>\n<ADDRESS>webserver/1.0</ADDRESS>\n</BODY></HTML>\n";
+        char* html_template = "<HTML>\r\n<HEAD><TITLE>Index of %s</TITLE></HEAD>\n\n<BODY>\r\n<H4>Index of %s</H4>\r\n<table CELLSPACING=8>\r\n<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\r\n";
+        char* footer = "</table>\r\n<HR>\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n</BODY></HTML>\r\n";
 
         size_t body_size = 0;
         size_t template_size = snprintf(NULL, 0, html_template, path, path) + 1;
@@ -504,8 +505,8 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
                 continue;
             }
 
-            char mod_time[20];
-            strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", localtime(&file_stat.st_mtime));
+            char mod_time[30];
+            strftime(mod_time, sizeof(mod_time), RFC1123FMT, gmtime(&file_stat.st_mtime));
 
             char* row_template = "<tr><td><A HREF=\"%s%s\">%s%s</A></td><td>%s</td><td>%s</td>\r\n</tr>\r\n\r\n";
             char size_str[32] = "";
