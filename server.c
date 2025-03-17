@@ -37,7 +37,7 @@ int is_index_html_in_directory(char *directory_path);
 char* create_response(char* status, int status_code, char* path, char* body, size_t body_size, size_t* total_size);
 char* get_response_body(int status_code, char* path, size_t* bytes_read);
 bool is_directory(const char* path);
-int send_file_to_socket(const char *file_path, size_t file_size, int client_socket);
+int send_file_to_socket(const char *path, int client_socket);
 
 int main(int argc, char *argv[]) {
 
@@ -136,7 +136,7 @@ int handle_client(void* arg) {
         goto end;
     }
     if (check_req == 501) {
-        send_response(*client_sock, "501 Not Implemented", 501, path);
+        send_response(*client_sock, "501 Not supported", 501, path);
         goto end;
     }
 
@@ -190,7 +190,7 @@ int check_path(char *path) {
         if (check_index_html == 1) {
             strcat(path, "index.html");
             stat(path+1, &stat_buf);
-            if (!(stat_buf.st_mode & S_IROTH))
+            if (!(stat_buf.st_mode & S_IROTH) || !(stat_buf.st_mode & S_IRUSR) || !(stat_buf.st_mode & S_IRGRP))
                 return 403;
             if (check_permission(path))
                 return 200;
@@ -204,7 +204,7 @@ int check_path(char *path) {
 
     if (S_ISREG(stat_buf.st_mode)) {
 
-        if (!(stat_buf.st_mode & S_IROTH) || !check_permission(path))
+        if (!(stat_buf.st_mode & S_IROTH) || !(stat_buf.st_mode & S_IRUSR) || !(stat_buf.st_mode & S_IRGRP) || !check_permission(path))
             return 403;
 
         return 200;
@@ -260,14 +260,13 @@ void send_response(const int client_sock, char* status, const int status_code, c
     DEBUG_PRINT("bytes: %zu\n", body_size);
     send(client_sock, response, total_size, 0);
     if (status_code == 200 && !is_directory(path)) {
-        if (send_file_to_socket(path + 1, body_size, client_sock) == -1)
+        if (send_file_to_socket(path + 1, client_sock) == -1)
             send_response(client_sock, "500 Internal Server Error", 500, NULL);
     }
     else
         free(body);
     free(response);
 }
-
 
 // check what type is a file
 char *get_mime_type(const char *name) {
@@ -311,6 +310,29 @@ char* create_response(char* status, const int status_code, char* path, char* bod
         snprintf(location_header, sizeof(location_header), "Location: %s/\r\n", path);
     }
 
+    char mod_time[20];
+    char real_mod_time[40];
+    strcpy(real_mod_time, "\n");
+
+
+    DEBUG_PRINT("status code: %d, path: %s", status_code, path);
+
+    if (status_code == 200){
+
+        struct stat file_stat;
+
+        if (stat(path+1, &file_stat) == -1) {
+            perror("stat");
+            free(body);
+            return NULL;
+        }
+
+        strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", localtime(&file_stat.st_mtime));
+        strcpy(real_mod_time, "Last-Modified: ");
+        strcat(real_mod_time, mod_time);
+        strcat(real_mod_time, "\n");
+    }
+
     size_t response_size = snprintf(
         NULL, 0,
         "HTTP/1.0 %s\r\n"
@@ -319,9 +341,10 @@ char* create_response(char* status, const int status_code, char* path, char* bod
         "%s"
         "%s"
         "Content-Length: %zu\r\n"
+        "%s"
         "Connection: close\r\n"
         "\r\n",
-        status, time_buffer, location_header, content_type, body_size);
+        status, time_buffer, location_header, content_type, body_size, real_mod_time);
 
     *total_size = response_size;
     if (body != NULL)
@@ -343,9 +366,10 @@ char* create_response(char* status, const int status_code, char* path, char* bod
         "%s"
         "%s"
         "Content-Length: %zu\r\n"
+        "%s"
         "Connection: close\r\n"
         "\r\n",
-        status, time_buffer, location_header, content_type, body_size);
+        status, time_buffer, location_header, content_type, body_size, real_mod_time);
 
     if (body != NULL)
         memcpy(response+response_size, body, body_size);
@@ -411,6 +435,7 @@ int is_index_html_in_directory(char *directory_path) {
         perror("sprintf");
         return -1;
     }
+    DEBUG_PRINT("find_index_html: path: %s\n", copied_path);
     struct stat file_stat;
     return does_file_exist(copied_path, &file_stat) ? 1 : 0;
 }
@@ -420,7 +445,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
     char* body;
     DEBUG_PRINT("%d %s\n", status_code, path);
 
-    // dirctory listing
+    // directory listing
     if (status_code == 200 && is_directory(path)) {
         DIR* dir;
         struct dirent* entry;
@@ -482,7 +507,7 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             char mod_time[20];
             strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", localtime(&file_stat.st_mtime));
 
-            char* row_template = "<tr><td><A HREF=\"%s%s\">%s%s</A></td><td>%s</td><td>%s</td></tr>\n";
+            char* row_template = "<tr><td><A HREF=\"%s%s\">%s%s</A></td><td>%s</td><td>%s</td>\r\n</tr>\r\n\r\n";
             char size_str[32] = "";
 
             if (S_ISDIR(file_stat.st_mode)) {
@@ -564,14 +589,14 @@ char* get_response_body(int status_code, char* path, size_t* bytes_read) {
             *bytes_read = 114;
         }
         if (status_code == 403) {
-            body = (char*)malloc(113);
+            body = (char*)malloc(112);
             snprintf(
-                body, 113,
+                body, 112,
                 "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\r\n"
                     "<BODY><H4>403 Forbidden</H4>\r\n"
                     "Access denied.\r\n"
                     "</BODY></HTML>\r\n");
-            *bytes_read = 113;
+            *bytes_read = 109;
         }
         if (status_code == 404) {
             body = (char*)malloc(113);
@@ -614,8 +639,7 @@ bool is_directory(const char* path) {
 }
 
 // send file contents to client
-int send_file_to_socket(const char *path, size_t file_size, int client_socket) {
-    DEBUG_PRINT("bytes: %zu\n", file_size);
+int send_file_to_socket(const char *path, int client_socket) {
     int file_descriptor = open(path, O_RDONLY);
     if (file_descriptor < 0) {
         perror("Failed to open file");
